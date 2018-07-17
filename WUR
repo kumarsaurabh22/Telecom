@@ -1,0 +1,1222 @@
+# Purpose : To build CUR Weekly - Captures upgrades at user level, TTU, Loyalty at weekly level
+
+# Description : This query captures the users who upgrade their phones within 24 to 192 weeks. The query also provides the device details and specs 
+
+# Input : 5 tables [ganges.device_modeling_table ,group_mr.CU_Output_Device_Loyalty_Store_Bands_Lookup , group_mr.output_into_excel_main_From_2009_Till_2012, group_mr.output_into_excel_main ]
+
+# Output : 2 tables [group_mr.Weekly_CU_Output , group_mr.Weekly_CU_Output_Device_Loyalty_Rate]
+
+# Developer : Achyut Anand
+# Date : 2018-04-30
+-----------------------------------------------------------------------------------------------------------------------------------------
+# Start Logging
+import datetime as D
+today = D.datetime.today()
+
+import logging
+logger = logging.getLogger(__name__)
+LogFile = "oct_log_" + str(today) + ".log";
+
+# Get a file handler (to print to a log file) and a stream handler (to print to the screen)
+file_handler = logging.FileHandler(LogFile)
+stream_handler = logging.StreamHandler()
+
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
+
+# Format
+formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(module)s: %(message)s')
+file_handler.setFormatter(formatter)
+stream_handler.setFormatter(formatter)
+
+# Set log level - INFO fine for now
+logger.setLevel(logging.INFO)
+----------------------------------------------------------------------------------------------------------------------------------------
+%run /GROUPS/mr/Telecom/Telecom_Migration/Reusable_Functions
+----------------------------------------------------------------------------------------------------------------------------------------
+from pyspark.sql.types import DoubleType, IntegerType, StringType, DateType, StructType, StructField
+from pyspark.sql import *
+import pyspark.sql.functions as F
+import pyspark.sql.window as W
+----------------------------------------------------------------------------------------------------------------------------------------
+# Portal P1 parameter schema
+
+# Converting the portal table from Pandas DF to PySpark DF
+schema = StructType([StructField("ModelID",IntegerType(), True)\
+                     ,StructField("Manufacturer_id",IntegerType(), True)\
+                     ,StructField("Model_Name",StringType(), True)\
+                     ,StructField("Manufacturer_Name",StringType(), True)\
+                     ,StructField("Device_Type",StringType(), True)\
+                     ,StructField("OS",StringType(), True)\
+                     ,StructField("Display_Size",StringType(), True)\
+                     ,StructField("Battery",StringType(), True)\
+                     ,StructField("Processor",StringType(), True)\
+                     ,StructField("ProcessorSpeed",StringType(), True)\
+                     ,StructField("Processor_Cores",StringType(), True)\
+                     ,StructField("ChipManufacturer",StringType(), True)\
+                     ,StructField("ChipModel",StringType(), True)\
+                     ])
+----------------------------------------------------------------------------------------------------------------------------------------
+## Declare variables
+
+# Input Table
+source_table = 'ganges.device_modeling_table'
+
+# Lookup tale
+Lookup_UnitCost_UnitPrice_EIP = 'group_mr.Lookup_UnitCost_UnitPrice_EIP'
+output_into_excel_main_weekly = 'group_mr.output_into_excel_main_weekly'
+Customer_id_Canada = 'group_mr.Customer_id_Canada'
+Customer_id_US = 'group_mr.Customer_id_US'  
+
+# portal Table
+Portal_DeviceP1Parameters = 'Portal_DeviceP1Parameters.csv'
+
+# Output table
+CU_Output_output_table = 'group_mr.Weekly_CU_Output'
+CU_Output_Device_Loyalty_Rate_output_table = 'group_mr.Weekly_CU_Output_Device_Loyalty_Rate'
+----------------------------------------------------------------------------------------------------------------------------------------
+## Declare dataframes
+# Input table
+source_table = spark.table(source_table)
+
+# Portal Tables
+Portal_DeviceP1Parameters = HRG_Load_Portal_Tables(Portal_DeviceP1Parameters)
+portal_P1_specs = sqlContext.createDataFrame(Portal_DeviceP1Parameters, schema)
+portal_P1_specs = portal_P1_specs.withColumn('OS',F.when((F.col('OS')=='NaN'),'Other').otherwise(F.col('OS')))
+
+# Lookup Tables
+
+Device_Loyalty_Store_band_lookup  = spark.table("group_mr.CU_Output_Device_Loyalty_Store_Bands_Lookup")
+
+output_into_excel_main_From_2009_Till_2012 = spark.table('group_mr.output_into_excel_main_From_2009_Till_2012')
+output_into_excel_main = spark.table('group_mr.output_into_excel_main').where("Model <> 'All Other/Low Volume/Older Models'")
+
+output_into_excel_main_From_2009_df = output_into_excel_main_From_2009_Till_2012.union(output_into_excel_main)
+
+output_into_excel_main_weekly = spark.table(output_into_excel_main_weekly).where("ModelID <> 'NA'")
+# output_into_excel_main_weekly_df = spark.table('group_mr.output_into_excel_main_weekly').where("ModelID <> 'NA'")
+
+Lookup_UnitCost_UnitPrice_EIP = spark.table(Lookup_UnitCost_UnitPrice_EIP)
+Customer_id_Canada_df = spark.table(Customer_id_Canada)
+Customer_id_US_df = spark.table(Customer_id_US)
+----------------------------------------------------------------------------------------------------------------------------------------
+def CUR_Weekly(source_table,Device_Loyalty_Store_band_lookup,portal_P1_specs,Lookup_UnitCost_UnitPrice_EIP,output_into_excel_main_weekly, output_into_excel_main_From_2009_df):
+
+# reading the table in the dataframe
+
+# Remove dataset = 'g'when the testing is done on Thames data and filtering Canadian Operators  
+
+  source_table_df = source_table\
+  .where("dataset = 'g'")\
+  .where("operator in ('Verizon','US Cellular','T-Mobile','AT&T','Cricket','Boost','Other','Virgin','MetroPCS','Sprint','AT&T & Cricket','Boost & Virgin')")
+
+# Adding the planned type to the cleaned input table
+
+  CU_Input_Cleaned_With_PlanType_df = source_table_df\
+  .where("store_device = 1")\
+  .where("transactionType = 'Sale'")\
+  .where("device_type in ('Smartphone','SmartPhone','Feature Phone')")\
+  .select('company'\
+        ,'StoreID'\
+        ,'SaleNumber'\
+        ,'TransactionType'\
+        ,'dateCreated'\
+        ,'priority'\
+        ,'serialnumber'\
+        ,'operator'\
+        ,'Manufacturer_final'\
+        ,'Model_final'\
+        ,F.col('financing').alias('plan_type')\
+        ,F.col('cust_id_sn').alias('customerid'))
+
+# Retainig data for a particular set of customer id based on area code lookup  
+  
+  CU_Input_Cleaned_With_PlanType_Canada_df = CU_Input_Cleaned_With_PlanType_df\
+.where("(length(customerid) = 10 or customerid like '___-___-____' or customerid LIKE '(___)___-____' or customerid LIKE '___ ___ ____' or customerid LIKE '_____-_____')")\
+.where("customerid NOT LIKE '%[A-Za-z]%'")\
+.where("customerid NOT LIKE '[1|0]%'")\
+.where("customerid NOT LIKE '%0000000%'")\
+.where("customerid NOT LIKE '%1111111%'")\
+.where("customerid NOT LIKE '%2222222%'")\
+.where("customerid NOT LIKE '%3333333%'")\
+.where("customerid NOT LIKE '%4444444%'")\
+.where("customerid NOT LIKE '%5555555%'")\
+.where("customerid NOT LIKE '%6666666%'")\
+.where("customerid NOT LIKE '%7777777%'")\
+.where("customerid NOT LIKE '%8888888%'")\
+.where("customerid NOT LIKE '%9999999%'")
+
+  CU_Input_Cleaned_With_PlanType_Canada_df = CU_Input_Cleaned_With_PlanType_Canada_df.alias('a')\
+  .join(
+  Customer_id_Canada_df.alias('b'),
+    [
+     F.substring('a.customerid',1,3) == F.col('b.Canada_Id')
+    ],'inner')\
+  .select('a.*')
+
+  CU_Input_Cleaned_With_PlanType_US_df = CU_Input_Cleaned_With_PlanType_df\
+  .where("customerid LIKE '(___)___-____'")
+
+  CU_Input_Cleaned_With_PlanType_US_df = CU_Input_Cleaned_With_PlanType_US_df.alias('a')\
+  .join(
+    Customer_id_US_df.alias('b'),
+    [
+     F.substring('a.customerid',1,3) == F.col('b.US_Id')
+    ],'inner')\
+  .select('a.*')
+
+  CU_Input_Cleaned_With_PlanType_df = CU_Input_Cleaned_With_PlanType_Canada_df.union(CU_Input_Cleaned_With_PlanType_US_df)
+
+
+## Change plan_type to Other when unapproved plan shows up under a given operator
+                                                                                              
+
+  CU_Input_Cleaned_With_PlanType_df = CU_Input_Cleaned_With_PlanType_df.alias('a')\
+  .withColumn('plan_type',
+              F.when(
+                (F.col('a.operator')=='AT&T')
+                &(F.col('a.plan_type')
+                  .isin('Next - Can''t Classify', 'Next 12', 'Next 18', 'Next 24', 'Next With Downpayment', 'Next', 'Next Every Year')==False)
+                |(F.col('a.plan_type').isNull())
+                ,'Other')\
+              .when(
+                (F.col('a.operator')
+                 .isin('Bell Mobility', 'Boost', 'Cricket', 'MetroPCS', 'Rogers Wireless', 'Telus', 'US Cellular', 'Virgin Mobile U.S.')==True)
+                |(F.col('a.plan_type').isNull())
+                ,'Other')\
+              .when(
+                (F.col('a.operator')=='Sprint')
+                &(F.col('a.plan_type')
+                  .isin('Easy Pay', 'Lease - Can''t Classify','Galaxy Forever', 'iPhone Forever','Lease', 'Lease 12', 'Lease 17', 'Lease 18', 'Lease 24', 'Lease 30','Sprint Flex')==False)
+                |(F.col('a.plan_type').isNull())
+                ,'Other')\
+              .when(
+                (F.col('a.operator')=='T-Mobile')
+                &(F.col('a.plan_type')
+                  .isin('Jump', 'Jump!', 'Jump On Demand', 'Jump! On Demand', 'Score', 'Jump Plus', 'Jump! Plus')==False)
+                |(F.col('a.plan_type').isNull())
+                ,'Other')\
+              .when(
+                (F.col('a.operator')=='Verizon')
+                &(F.col('a.plan_type').isin('Device Payment', 'Device Payment - EIP', 'Device Payment - EUP', 'Edge')==False)
+                |(F.col('a.plan_type').isNull())
+                ,'Other')
+              .otherwise(F.col('a.plan_type')))\
+  .select('company','StoreID', 'SaleNumber','TransactionType','customerid',
+          'dateCreated','priority','serialnumber','operator','Manufacturer_final',
+          'Model_final', F.col('plan_type').alias('plan_type'))\
+  .withColumn('RN2',F.row_number().over(W.Window.partitionBy(F.col('customerid')).orderBy(F.asc('dateCreated'))))\
+                                 .orderBy(F.asc('RN2'))
+
+### Create the transaction level table with "days between" column
+
+  CU_SKU_Level_Output_df = CU_Input_Cleaned_With_PlanType_df.alias('a')\
+  .join(
+    CU_Input_Cleaned_With_PlanType_df.alias('b'),
+    [
+      F.col('a.customerid')== F.col('b.customerid'),
+      ((F.col('a.RN2') == F.col('b.RN2') - 1) |
+      (F.col('a.RN2') + 1 == F.col('b.RN2')))
+    ],
+    'full_outer')\
+  .where("a.customerid is not NULL and b.datecreated is not NULL")\
+  .select('a.customerid',F.col('a.dateCreated').alias('Device1_PurchaseDate'),\
+          F.col('a.operator').alias('Device1_Operator'),\
+          F.col('a.manufacturer_final').alias('Device1_Manufacturer'),\
+          F.col('a.model_final').alias('Device1_Model'),\
+          F.col('a.plan_type').alias('Device1_PlanType'),\
+          F.col('b.dateCreated').alias('Device2_PurchaseDate'),\
+          F.col('b.operator').alias('Device2_Operator'),\
+          F.col('b.manufacturer_final').alias('Device2_Manufacturer'),\
+          F.col('b.model_final').alias('Device2_Model'),\
+          F.col('b.plan_type').alias('Device2_PlanType'))\
+  .withColumn('Days_Between',F.datediff(F.col('Device2_PurchaseDate'),F.col('Device1_PurchaseDate')))
+
+
+#Create the output table
+
+# Creating temp1 dataframe - calculating Metrics like Quantity and TTU in months
+
+
+  temp1_df = CU_SKU_Level_Output_df\
+  .groupBy(date_trunc(F.col('Device1_PurchaseDate'),'week').alias('Device1_PurchaseWeek'),\
+                                         F.col('Device1_Operator'),\
+                                         F.col('Device1_Manufacturer'),\
+                                         F.col('Device1_Model'),\
+                                         F.col('Device1_PlanType'),\
+                                         date_trunc(F.col('Device2_PurchaseDate'),'week').alias('Device2_PurchaseWeek'),\
+                                         F.col('Device2_Operator'),\
+                                         F.col('Device2_Manufacturer'),\
+                                         F.col('Device2_Model'),\
+                                         F.col('Device2_PlanType'))\
+  .agg(F.count(F.lit(1)).alias('Quantity'),\
+       F.avg(F.months_between(F.col('Device2_PurchaseDate'),F.col('Device1_PurchaseDate'))).alias('TTU_in_Months'),\
+       F.avg(F.col('Days_Between')/7).alias('TTU_in_Weeks'))\
+  .select('Device1_PurchaseWeek'\
+          ,'Device1_Operator'\
+          ,'Device1_Manufacturer'\
+          ,'Device1_Model',\
+          F.when((F.col('Device1_Operator').isin('Telus', 'Rogers Wireless', 'Chatr','Cincinnati Bell','Fido','MTS','Other','Koodo','Mobilicity', 'Pocket Communications','Sasktel','Shentel','TracFone','Virgin Mobile Canada','Cellcom', 'Bell Mobility', 'Freedom Mobile')==True),'Canada').otherwise('US').alias('Device1_Country'),\
+          'Device1_PlanType'\
+          ,'Device2_PurchaseWeek'\
+          ,'Device2_Operator'\
+          ,'Device2_Manufacturer'\
+          ,'Device2_Model',\
+          F.when((F.col('Device2_Operator').isin('Telus', 'Rogers Wireless', 'Chatr','Cincinnati Bell','Fido','MTS','Other','Koodo','Mobilicity', 'Pocket Communications','Sasktel','Shentel','TracFone','Virgin Mobile Canada','Cellcom', 'Bell Mobility', 'Freedom Mobile')==True),'Canada').otherwise('US').alias('Device2_Country'),'Device2_PlanType','Quantity','TTU_in_Weeks','TTU_in_Months')
+                                                                        
+                                                                       
+# Cleanup output table
+  temp1_df = temp1_df.where("not(TTU_in_Months is null or Device1_Operator is null or Device1_Manufacturer is null or Device1_Model is null or Device2_Operator is null or Device2_Manufacturer is null or Device2_Model is null or Device1_Country <> Device2_Country )")
+
+#  Don't want to show cross country flow - very small as well.  Eliminating these will help us to have country field in the output
+  
+#Portal table Portal_DeviceP1Parameters
+  portal_specs_df = portal_P1_specs
+
+  temp1d_df = temp1_df.alias('a')\
+  .join(portal_specs_df.alias('b'),
+      [
+        F.col('a.Device1_Manufacturer')== F.col('b.Manufacturer_Name'),
+        F.col('a.Device1_Model') == F.col('b.Model_Name')
+      ],
+      'left').join(portal_specs_df.alias('c'),
+                  [
+                    F.col('a.Device2_Manufacturer') == F.col('c.Manufacturer_Name'),
+                    F.col('a.Device2_Model') == F.col('c.Model_Name')
+                  ],'left')\
+  .where("a.Device1_PurchaseWeek is not null")\
+  .where("a.Device1_Operator is not null")\
+  .where("a.Device1_Manufacturer is not null")\
+  .where("a.Device1_Model is not null")\
+  .where("a.Device2_PurchaseWeek is not null")\
+  .where("a.Device2_Operator is not null")\
+  .where("a.Device2_Manufacturer is not null")\
+  .where("a.Device2_Model is not null")\
+  .where("a.TTU_in_Weeks >= 24")\
+  .where("a.TTU_in_Weeks <= 192")\
+  .orderBy('a.Device1_PurchaseWeek','a.Device1_Operator','a.Device1_Manufacturer',
+           'a.Device1_Model','a.Device1_PlanType','a.Device2_PurchaseWeek','a.Device2_Operator',
+           'a.Device2_Manufacturer','a.Device2_Model','a.Device2_PlanType')\
+  .select(F.col('a.Device1_Country').alias('Country'),\
+       'a.Device1_PurchaseWeek',\
+#        'a.Device1_PurchaseQuarter',\
+#        'a.QuarterNumber',\
+       'a.Device1_Operator',\
+       'a.Device1_Manufacturer',\
+       'a.Device1_Model',\
+        F.col('b.OS').alias('Device1_OS'),\
+        F.col('b.Device_Type').alias('Device1_Smartphone'),\
+#         F.col('b.Display_Size'),\
+        F.col('b.Display_Size').alias('Device1_Display_PhysicalSize'),\
+        F.col('b.battery').alias('Device1_BatteryCapacity'),\
+        F.col('b.ChipModel').alias('Device1_Chip'),\
+        F.col('b.ChipManufacturer').alias('Device1_Chip_Designer_Mfg'),\
+        F.col('b.Processor_Cores').alias('Device1_Number_of_Cores'),\
+        F.col('b.ProcessorSpeed').alias('Device1_ProcessorSpeed'),\
+       'a.Device1_PlanType',\
+       'a.Device2_PurchaseWeek',\
+#        'a.Device2_PurchaseQuarter',\
+       'a.Device2_Operator',\
+       'a.Device2_Manufacturer',\
+       'a.Device2_Model',\
+        F.col('c.OS').alias('Device2_OS'),\
+        F.col('c.Device_Type').alias('Device2_Smartphone'),\
+        F.col('c.Display_Size').alias('Device2_Display_PhysicalSize'),\
+        F.col('c.battery').alias('Device2_BatteryCapacity'),\
+        F.col('c.ChipModel').alias('Device2_Chip'),\
+        F.col('c.ChipManufacturer').alias('Device2_Chip_Designer_Mfg'),\
+        F.col('c.Processor_Cores').alias('Device2_Number_of_Cores'),\
+        F.col('c.ProcessorSpeed').alias('Device2_ProcessorSpeed'),\
+       'a.Device2_PlanType',\
+       'a.Quantity',\
+       'a.TTU_in_Weeks',\
+       'a.TTU_in_Months')
+
+# Creating new columns for Operator Tier and Screen Size bands
+
+  temp1d_df = temp1d_df.alias('a')\
+.withColumn("Device1_Operator_Tier",F.when((F.col('a.Device1_Operator').isin('AT&T', 'T-Mobile', 'Sprint', 'Verizon')==True),'Tier 1')\
+            .when((F.col('a.Device1_Operator').isin('Boost','Cricket','MetroPCS','US Cellular', 'Virgin Mobile U.S.')==True),'Tier 2').otherwise('NA'))\
+.withColumn("Device2_Operator_Tier",F.when((F.col('a.Device2_Operator').isin('AT&T', 'T-Mobile', 'Sprint', 'Verizon')==True),'Tier 1')\
+            .when((F.col('a.Device2_Operator').isin('Boost','Cricket','MetroPCS','US Cellular', 'Virgin Mobile U.S.')==True),'Tier 2').otherwise('NA'))\
+.withColumn("Device1_ScreenSizeBand",F.when((F.col('a.Device1_Display_PhysicalSize').cast(DoubleType()))< 2,'Band 1) 0-1.99')\
+            .when((F.col('a.Device1_Display_PhysicalSize').cast(DoubleType()))< 3,'Band 2) 2-2.99')\
+            .when((F.col('a.Device1_Display_PhysicalSize').cast(DoubleType()))< 4,'Band 3) 3-3.99')\
+            .when((F.col('a.Device1_Display_PhysicalSize').cast(DoubleType()))< 5,'Band 4) 4-4.99')\
+            .when((F.col('a.Device1_Display_PhysicalSize').cast(DoubleType()))< 6,'Band 5) 5-5.99')\
+            .when((F.col('a.Device1_Display_PhysicalSize').cast(DoubleType())) >= 6,'Band 6) >6 inches').otherwise('NA'))\
+.withColumn("Device2_ScreenSizeBand",F.when((F.col('a.Device2_Display_PhysicalSize').cast(DoubleType()))< 2,'Band 1) 0-1.99')\
+            .when((F.col('a.Device2_Display_PhysicalSize').cast(DoubleType()))< 3,'Band 2) 2-2.99')\
+            .when((F.col('a.Device2_Display_PhysicalSize').cast(DoubleType()))< 4,'Band 3) 3-3.99')\
+            .when((F.col('a.Device2_Display_PhysicalSize').cast(DoubleType()))< 5,'Band 4) 4-4.99')\
+            .when((F.col('a.Device2_Display_PhysicalSize').cast(DoubleType()))< 6,'Band 5) 5-5.99')\
+            .when((F.col('a.Device2_Display_PhysicalSize').cast(DoubleType())) >= 6,'Band 6) >6 inches').otherwise('NA'))\
+.withColumn("GMV_TTU", F.col('a.TTU_in_Months')*(F.col('a.Quantity').cast(DoubleType())))\
+.withColumn("GMV_TTU_in_Weeks", F.col('a.TTU_in_Weeks')*(F.col('a.Quantity').cast(DoubleType())))
+
+
+
+#  Calculating the monthly prices
+  MonthlyPhonePrices_df = output_into_excel_main_From_2009_df\
+  .groupBy('Month_Year','Operator','Manufacturer','Model')\
+  .agg(F.avg('Avg_Store_Cost').alias('Avg_Store_Cost'),F.avg('Avg_Retail_Price').alias('Avg_Retail_Price'),\
+    F.avg('Full_Cash_Price').alias('Avg_Full_Cash_Price'),F.avg('Online_Advertised_Price').alias('Avg_Online_Advertised_Price'))
+
+# Calculating the weekly prices
+
+  output_into_excel_main_weekly_df = output_into_excel_main_weekly.where("ModelID <> 'NA'")
+  Lookup_UnitCost_UnitPrice_EIP_df = Lookup_UnitCost_UnitPrice_EIP
+
+  WeeklyPhonePrices_df = output_into_excel_main_weekly_df\
+  .groupBy('Week_Starting','Operator','Manufacturer','Model')\
+  .agg(F.avg('Avg_Store_Cost').alias('Avg_Store_Cost'),F.avg('Avg_Retail_Price').alias('Avg_Retail_Price'),\
+    F.avg('Full_Cash_Price').alias('Avg_Full_Cash_Price'),F.avg('Online_Advertised_Price').alias('Avg_Online_Advertised_Price'))
+
+# Calculating the weekly UCUP table
+
+  WeeklyUCUP_df = Lookup_UnitCost_UnitPrice_EIP_df\
+  .groupBy(date_trunc(F.col('StartDate'),'week').alias('Week_Starting'),\
+                                         F.col('Operator'),\
+                                         F.col('Manufacturer'), F.col('Model'))\
+  .agg(F.avg('UnitCost').alias('Avg_Full_Cash_Price'),F.avg('UnitPrice').alias('Avg_Online_Advertised_Price'))
+
+# Update temp1d_df
+  temp1d_df= temp1d_df.alias('a')\
+  .withColumn('Device1_Manufacturer_update',
+              F.when((F.col('a.Device1_Manufacturer')=='Nokia')&(F.col('a.Device1_PurchaseWeek')>= '2014-05-01')&(F.col('a.Device1_PurchaseWeek') <= '2016-11-01'),'Microsoft')\
+              .when((F.col('a.Device1_Manufacturer') == 'Nokia')&(F.col('a.Device1_PurchaseWeek')>= '2016-12-01'),'HMD Global - Nokia').otherwise(F.col('a.Device1_Manufacturer')))\
+  .withColumn('Device2_Manufacturer_update',
+              F.when((F.col('a.Device2_Manufacturer')=='Nokia')&(F.col('a.Device2_PurchaseWeek')>= '2014-05-01')&(F.col('a.Device2_PurchaseWeek') <= '2016-11-01'),'Microsoft')\
+              .when((F.col('a.Device2_Manufacturer') == 'Nokia')&(F.col('a.Device2_PurchaseWeek')>= '2016-12-01'),'HMD Global - Nokia').otherwise(F.col('a.Device2_Manufacturer')))
+
+# performing selection of relevant columns 
+
+  temp1d_df = temp1d_df\
+  .select('country'\
+          ,'Device1_PurchaseWeek'\
+          ,'Device1_Operator'\
+          ,F.col('Device1_Manufacturer_update').alias('Device1_Manufacturer')\
+          ,'Device1_Model'\
+          ,'Device1_OS'\
+          ,'Device1_Smartphone'\
+          ,'Device1_Display_PhysicalSize'\
+          ,'Device1_BatteryCapacity'\
+          ,'Device1_Chip'\
+          ,'Device1_Chip_Designer_Mfg'\
+          ,'Device1_Number_of_Cores'\
+          ,'Device1_ProcessorSpeed'\
+          ,'Device1_PlanType'\
+          ,'Device2_PurchaseWeek'\
+          ,'Device2_Operator'\
+          ,F.col('Device2_Manufacturer_update').alias('Device2_Manufacturer')\
+          ,'Device2_Model'\
+          ,'Device2_OS'\
+          ,'Device2_Smartphone'\
+          ,'Device2_Display_PhysicalSize'\
+          ,'Device2_BatteryCapacity'\
+          ,'Device2_Chip'\
+          ,'Device2_Chip_Designer_Mfg'\
+          ,'Device2_Number_of_Cores'\
+          ,'Device2_ProcessorSpeed'\
+          ,'Device2_PlanType'\
+          ,'Quantity'\
+          ,'TTU_in_Weeks'\
+          ,'TTU_in_Months'\
+          ,'Device1_Operator_Tier'\
+          ,'Device2_Operator_Tier'\
+          ,'Device1_ScreenSizeBand'\
+          ,'Device2_ScreenSizeBand'\
+          ,'GMV_TTU'\
+          ,'GMV_TTU_in_Weeks')
+
+
+# Joining with weekly prices table
+# Joining with monthly prices table
+
+  Weekly_CU_Output_df = temp1d_df.alias('a')\
+  .join(WeeklyPhonePrices_df.alias('b'),
+      [
+        F.col('a.Device1_PurchaseWeek')== F.col('b.Week_Starting'),
+        F.col('a.Device1_Operator') == F.col('b.Operator'),
+        F.col('a.Device1_Manufacturer')== F.col('b.Manufacturer'),
+        F.col('a.Device1_Model') == F.col('b.Model')
+      ],
+      'left').join(WeeklyPhonePrices_df.alias('c'),
+                  [
+                     F.col('a.Device2_PurchaseWeek')== F.col('c.Week_Starting'),
+                     F.col('a.Device2_Operator') == F.col('c.Operator'),
+                     F.col('a.Device2_Manufacturer')== F.col('c.Manufacturer'),
+                     F.col('a.Device2_Model') == F.col('c.Model')
+                  ],'left').join(MonthlyPhonePrices_df.alias('d'),
+                          [
+                            F.year('a.Device1_PurchaseWeek')== F.year('d.Month_Year'),
+                            F.month('a.Device1_PurchaseWeek')== F.month('d.Month_Year'),
+                            F.col('a.Device1_Operator') == F.col('d.Operator'),
+                            F.col('a.Device1_Manufacturer')== F.col('d.Manufacturer'),
+                            F.col('a.Device1_Model') == F.col('d.Model')
+                          ],
+                          'left').join(MonthlyPhonePrices_df.alias('e'),
+                                  [
+                                     F.year('a.Device2_PurchaseWeek')== F.year('e.Month_Year'),
+                                     F.month('a.Device2_PurchaseWeek')== F.month('e.Month_Year'),
+                                     F.col('a.Device2_Operator') == F.col('e.Operator'),
+                                     F.col('a.Device2_Manufacturer')== F.col('e.Manufacturer'),
+                                     F.col('a.Device2_Model') == F.col('e.Model')
+                                  ],'left')\
+  .select(F.col('a.Country'),\
+       'a.Device1_PurchaseWeek',\
+#        'a.Device1_PurchaseQuarter',\
+#        'a.QuarterNumber',\
+       'a.Device1_Operator',\
+       'a.Device1_Operator_Tier',\
+       'a.Device1_Manufacturer',\
+       'a.Device1_Model',\
+       'a.Device1_OS',\
+       F.col('a.Device1_Smartphone').alias('Device1_Smartphone'),\
+       F.coalesce('b.Avg_Store_Cost','d.Avg_Store_Cost').alias('Device1_Avg_Store_Cost'),\
+       F.coalesce('b.Avg_Retail_Price','d.Avg_Retail_Price').alias('Device1_Avg_Retail_Price'),\
+       F.coalesce('b.Avg_Full_Cash_Price','d.Avg_Full_Cash_Price').alias('Device1_Avg_Full_Cash_Price'),\
+       F.coalesce('b.Avg_Online_Advertised_Price','d.Avg_Online_Advertised_Price').alias('Device1_Avg_Online_Advertised_Price'),\
+       'a.Device1_Display_PhysicalSize',\
+       'a.Device1_BatteryCapacity',\
+       'a.Device1_Chip',\
+       'a.Device1_Chip_Designer_Mfg',\
+       'a.Device1_Number_of_Cores',\
+       'a.Device1_ProcessorSpeed' ,\
+       'a.Device1_PlanType',\
+       'a.Device1_ScreenSizeBand',\
+       'a.Device2_PurchaseWeek',\
+#        'a.Device2_PurchaseQuarter',\
+#        'a.QuarterNumber',\
+       'a.Device2_Operator',\
+       'a.Device2_Operator_Tier',\
+       'a.Device2_Manufacturer',\
+       'a.Device2_Model',\
+       'a.Device2_OS',\
+       F.col('a.Device2_Smartphone').alias('Device2_Smartphone'),\
+       F.coalesce('c.Avg_Store_Cost','e.Avg_Store_Cost').alias('Device2_Avg_Store_Cost'),\
+       F.coalesce('c.Avg_Retail_Price','e.Avg_Retail_Price').alias('Device2_Avg_Retail_Price'),\
+       F.coalesce('c.Avg_Full_Cash_Price','e.Avg_Full_Cash_Price').alias('Device2_Avg_Full_Cash_Price'),\
+       F.coalesce('c.Avg_Online_Advertised_Price','e.Avg_Online_Advertised_Price').alias('Device2_Avg_Online_Advertised_Price'),\
+       'a.Device2_Display_PhysicalSize',\
+       'a.Device2_BatteryCapacity',\
+       'a.Device2_Chip',\
+       'a.Device2_Chip_Designer_Mfg',\
+       'a.Device2_Number_of_Cores',\
+       'a.Device2_ProcessorSpeed' ,\
+       'a.Device2_PlanType',\
+       'a.Device2_ScreenSizeBand',\
+       'a.Quantity',\
+       'a.TTU_in_Months',\
+       'a.GMV_TTU',\
+       'a.TTU_in_Weeks',\
+       'a.GMV_TTU_in_Weeks')
+
+
+# Adding column with Store Cost bands
+  Weekly_CU_Output_df = Weekly_CU_Output_df.alias('a')\
+  .withColumn("Device1_Avg_Store_Cost_Band",F.when((F.col('a.Device1_Avg_Store_Cost'))< 150,'Low Tier (<$150)')\
+            .when(((F.col('a.Device1_Avg_Store_Cost'))>= 150) & ((F.col('a.Device1_Avg_Store_Cost'))< 450),'Mid Tier ($150-$449)')\
+            .when(((F.col('a.Device1_Avg_Store_Cost'))>= 450) & ((F.col('a.Device1_Display_PhysicalSize'))< 5.5),'Premium Tier (Cost >= $450 and Display Size < 5.5)')\
+            .when(((F.col('a.Device1_Avg_Store_Cost'))>= 450) & ((F.col('a.Device1_Display_PhysicalSize'))>= 5.5),'Super Premium Tier (Cost >= $450 and Display Size >= 5.5)').otherwise('NA'))\
+  .withColumn("Device1_Avg_Store_Cost_Band_Custom",F.when((F.col('a.Device1_Avg_Store_Cost'))< 100,'Band 1) Low Tier (<$100)')\
+            .when((F.col('a.Device1_Avg_Store_Cost'))< 200,'Band 2) Mid Tier ($100-$199.99)')\
+            .when((F.col('a.Device1_Avg_Store_Cost'))< 400,'Band 3) High Tier ($200-$400.00)')\
+            .when((F.col('a.Device1_Avg_Store_Cost')) >= 400,'Band 4) Premium Tier ($400 and above)').otherwise('NA'))\
+  .withColumn("Device2_Avg_Store_Cost_Band",F.when((F.col('a.Device2_Avg_Store_Cost'))< 150,'Low Tier (<$150)')\
+            .when(((F.col('a.Device2_Avg_Store_Cost'))>= 150) & ((F.col('a.Device2_Avg_Store_Cost'))< 450),'Mid Tier ($150-$449)')\
+            .when(((F.col('a.Device2_Avg_Store_Cost'))>= 450) & ((F.col('a.Device2_Display_PhysicalSize'))< 5.5),'Premium Tier (Cost >= $450 and Display Size < 5.5)')\
+            .when(((F.col('a.Device2_Avg_Store_Cost'))>= 450) & ((F.col('a.Device2_Display_PhysicalSize'))>= 5.5),'Super Premium Tier (Cost >= $450 and Display Size >= 5.5)').otherwise('NA'))\
+  .withColumn("Device2_Avg_Store_Cost_Band_Custom",F.when((F.col('a.Device2_Avg_Store_Cost'))< 100,'Band 1) Low Tier (<$100)')\
+            .when((F.col('a.Device2_Avg_Store_Cost'))< 200,'Band 2) Mid Tier ($100-$199.99)')\
+            .when((F.col('a.Device2_Avg_Store_Cost'))< 400,'Band 3) High Tier ($200-$400.00)')\
+            .when((F.col('a.Device2_Avg_Store_Cost')) >= 400,'Band 4) Premium Tier ($400 and above)').otherwise('NA'))
+
+
+## Merge Boost and Virgin and AT&T and Cricket
+
+
+  Weekly_CU_Output_df = Weekly_CU_Output_df.alias('a')\
+  .withColumn("Device1_Operator_Update",
+              F.when((F.col('a.Device1_Operator').isin('Boost','Virgin Mobile U.S.')==True),'Boost & Virgin')\
+              .when((F.col('a.Device1_Operator').isin('AT&T','Cricket')==True),'AT&T & Cricket').otherwise(F.col('a.Device1_Operator')))\
+  .withColumn("Device2_Operator_Update",
+              F.when((F.col('a.Device2_Operator').isin('Boost','Virgin Mobile U.S.')==True),'Boost & Virgin')\
+              .when((F.col('a.Device2_Operator').isin('AT&T','Cricket')==True),'AT&T & Cricket').otherwise(F.col('a.Device2_Operator')))
+
+
+  Weekly_CU_Output_df = Weekly_CU_Output_df.alias('a')\
+  .withColumn("Device1_Operator_Tier_Update",
+              F.when((F.col('a.Device1_Operator_Update').isin('AT&T & Cricket')==True),'Tier 1').otherwise(F.col('a.Device1_Operator_Tier')))\
+  .withColumn("Device2_Operator_Tier_Update",
+              F.when((F.col('a.Device2_Operator_Update').isin('AT&T & Cricket')==True),'Tier 1').otherwise(F.col('a.Device2_Operator_Tier')))
+
+  Weekly_CU_Output_df = Weekly_CU_Output_df.select('country',\
+                                             'Device1_PurchaseWeek',\
+                                             F.col('Device1_Operator_Update').alias('Device1_Operator'), \
+                                             F.col('Device1_Operator_Tier_Update').alias('Device1_Operator_Tier'),\
+                                             'Device1_Manufacturer',\
+                                             'Device1_Model',\
+                                             'Device1_OS',\
+                                             'Device1_Smartphone',\
+                                             'Device1_Avg_Store_Cost' , \
+                                             'Device1_Avg_Retail_Price', \
+                                             'Device1_Avg_Full_Cash_Price',\
+                                             'Device1_Avg_Online_Advertised_Price',\
+                                             'Device1_Display_PhysicalSize',\
+                                             'Device1_BatteryCapacity',\
+                                             'Device1_Chip', \
+                                             'Device1_Chip_Designer_Mfg', \
+                                             'Device1_Number_of_Cores',\
+                                             'Device1_ProcessorSpeed',\
+                                             'Device1_PlanType',\
+                                             'Device1_ScreenSizeBand',\
+                                             'Device1_Avg_Store_Cost_Band',\
+                                             'Device1_Avg_Store_Cost_Band_Custom',\
+                                             'Device2_PurchaseWeek',\
+#                                              'Device2_PurchaseQuarter',\
+                                             F.col('Device2_Operator_Update').alias('Device2_Operator'), \
+                                             F.col('Device2_Operator_Tier_Update').alias('Device2_Operator_Tier'),\
+                                             'Device2_Manufacturer',\
+                                             'Device2_Model',\
+                                             'Device2_OS',\
+                                             'Device2_Smartphone',\
+                                             'Device2_Avg_Store_Cost' , \
+                                             'Device2_Avg_Retail_Price', \
+                                             'Device2_Avg_Full_Cash_Price',\
+                                             'Device2_Avg_Online_Advertised_Price',\
+                                             'Device2_Display_PhysicalSize',\
+                                             'Device2_BatteryCapacity',\
+                                             'Device2_Chip', \
+                                             'Device2_Chip_Designer_Mfg', \
+                                             'Device2_Number_of_Cores',\
+                                             'Device2_ProcessorSpeed',\
+                                             'Device2_PlanType',\
+                                             'Device2_ScreenSizeBand',\
+                                             'Device2_Avg_Store_Cost_Band',\
+                                             'Device2_Avg_Store_Cost_Band_Custom',\
+                                             'Quantity',\
+                                             'TTU_in_Months',\
+                                             'GMV_TTU',\
+                                             'TTU_in_Weeks',\
+                                             'GMV_TTU_in_Weeks')
+
+
+# -- Now, based on the # of observations, we have decided when to start for each carrier.  Let us mark them as "Other" and see what happens
+
+
+  Weekly_CU_Output_df = Weekly_CU_Output_df.alias('a')\
+  .withColumn("Device2_Operator_Update1",
+              F.when(((F.col('a.Device2_Operator')=='Boost & Virgin') & (F.col('a.Device2_PurchaseWeek')<'2012-07-01'))|
+                     ((F.col('a.Device2_Operator')=='Cricket') & (F.col('a.Device2_PurchaseWeek')<'2011-07-01'))|
+                     ((F.col('a.Device2_Operator')=='MetroPCS') & (F.col('a.Device2_PurchaseWeek')<'2013-10-01'))|
+                     ((F.col('a.Device2_Operator')=='Sprint') & (F.col('a.Device2_PurchaseWeek')<'2010-10-01'))|
+                     ((F.col('a.Device2_Operator')=='T-Mobile') & (F.col('a.Device2_PurchaseWeek')<'2012-07-01'))|
+                     ((F.col('a.Device2_Operator')=='US Cellular') & (F.col('a.Device2_PurchaseWeek')<'2009-07-01'))|
+                     ((F.col('a.Device2_Operator')=='Rogers Wireless') & (F.col('a.Device2_PurchaseWeek')<'2011-04-01'))|
+                     ((F.col('a.Device2_PurchaseWeek')<'2009-01-01')),'Other').otherwise(F.col('a.Device2_Operator')))\
+  .withColumn("Device2_Operator_Tier_update1",
+              F.when(((F.col('a.Device2_Operator')=='Boost & Virgin') & (F.col('a.Device2_PurchaseWeek')<'2012-07-01'))|
+                     ((F.col('a.Device2_Operator')=='Cricket') & (F.col('a.Device2_PurchaseWeek')<'2011-07-01'))|
+                     ((F.col('a.Device2_Operator')=='MetroPCS') & (F.col('a.Device2_PurchaseWeek')<'2013-10-01'))|
+                     ((F.col('a.Device2_Operator')=='Sprint') & (F.col('a.Device2_PurchaseWeek')<'2010-10-01'))|
+                     ((F.col('a.Device2_Operator')=='T-Mobile') & (F.col('a.Device2_PurchaseWeek')<'2012-07-01'))|
+                     ((F.col('a.Device2_Operator')=='US Cellular') & (F.col('a.Device2_PurchaseWeek')<'2009-07-01'))|
+                     ((F.col('a.Device2_Operator')=='Rogers Wireless') & (F.col('a.Device2_PurchaseWeek')<'2011-04-01'))|
+                     ((F.col('a.Device2_PurchaseWeek')<'2009-01-01')),'NA').otherwise(F.col('a.Device2_Operator_Tier')))  
+
+# Restructuring dataframe
+  Weekly_CU_Output_df = Weekly_CU_Output_df.select('country',\
+                                             'Device1_PurchaseWeek',\
+                                             F.col('Device1_Operator').alias('Device1_Operator'), \
+                                             'Device1_Operator_Tier',\
+                                             'Device1_Manufacturer',\
+                                             'Device1_Model',\
+                                             'Device1_OS',\
+                                             'Device1_Smartphone',\
+                                             'Device1_Avg_Store_Cost' , \
+                                             'Device1_Avg_Retail_Price', \
+                                             'Device1_Avg_Full_Cash_Price',\
+                                             'Device1_Avg_Online_Advertised_Price',\
+                                             'Device1_Display_PhysicalSize',\
+                                             'Device1_BatteryCapacity',\
+                                             'Device1_Chip', \
+                                             'Device1_Chip_Designer_Mfg', \
+                                             'Device1_Number_of_Cores',\
+                                             'Device1_ProcessorSpeed',\
+                                             'Device1_PlanType',\
+                                             'Device1_ScreenSizeBand',\
+                                             'Device1_Avg_Store_Cost_Band',\
+                                             'Device1_Avg_Store_Cost_Band_Custom',\
+                                             'Device2_PurchaseWeek',\
+#                                              'Device2_PurchaseQuarter',\
+                                             F.col('Device2_Operator_Update1').alias('Device2_Operator'), \
+                                             F.col('Device2_Operator_Tier_update1').alias('Device2_Operator_Tier'),\
+                                             'Device2_Manufacturer',\
+                                             'Device2_Model',\
+                                             'Device2_OS',\
+                                             'Device2_Smartphone',\
+                                             'Device2_Avg_Store_Cost' , \
+                                             'Device2_Avg_Retail_Price', \
+                                             'Device2_Avg_Full_Cash_Price',\
+                                             'Device2_Avg_Online_Advertised_Price',\
+                                             'Device2_Display_PhysicalSize',\
+                                             'Device2_BatteryCapacity',\
+                                             'Device2_Chip', \
+                                             'Device2_Chip_Designer_Mfg', \
+                                             'Device2_Number_of_Cores',\
+                                             'Device2_ProcessorSpeed',\
+                                             'Device2_PlanType',\
+                                             'Device2_ScreenSizeBand',\
+                                             'Device2_Avg_Store_Cost_Band',\
+                                             'Device2_Avg_Store_Cost_Band_Custom',\
+                                             'Quantity',\
+                                             'TTU_in_Months',\
+                                             'GMV_TTU',\
+                                             'TTU_in_Weeks',\
+                                             'GMV_TTU_in_Weeks')
+
+
+# -- Device 1
+# -- Mark the OEMs with lower volume as "Other"
+
+
+  temp2_df = Weekly_CU_Output_df\
+  .groupBy(F.col('Device1_Operator'),F.col('Device1_Manufacturer'))\
+  .agg(F.sum(F.col('Quantity')).alias('Quantity'))
+
+# Updating  OEMs with lower volume as "Other"
+
+  Weekly_CU_Output_df = Weekly_CU_Output_df.alias('a')\
+  .join(
+    temp2_df.alias('b'),
+    [
+      F.col('a.Device1_Operator') == F.col('b.Device1_Operator'),
+      F.col('a.Device1_Manufacturer') == F.col('b.Device1_Manufacturer')
+    ],'left')\
+  .withColumn('Device1_Manufacturer_updated',
+              F.when((F.col('b.Quantity') < 1000),'Other')\
+              .otherwise(F.col('a.Device1_Manufacturer')))\
+  .withColumn('Device1_Model_updated',
+              F.when((F.col('b.Quantity') < 1000),'Other')\
+              .otherwise(F.col('a.Device1_Model')))\
+  .withColumn('Device1_OS_updated',
+            F.when((F.col('b.Quantity') < 1000),'Other')\
+            .otherwise(F.col('a.Device1_OS'))).select('country',\
+                                             'Device1_PurchaseWeek',\
+                                             'a.Device1_Operator', \
+                                             'Device1_Operator_Tier',\
+                                             F.col('Device1_Manufacturer_updated').alias('Device1_Manufacturer'),\
+                                             F.col('Device1_Model_updated').alias('Device1_Model'),\
+                                             F.col('Device1_OS_updated').alias('Device1_OS'),\
+                                             'Device1_Smartphone',\
+                                             'Device1_Avg_Store_Cost' , \
+                                             'Device1_Avg_Retail_Price', \
+                                             'Device1_Avg_Full_Cash_Price',\
+                                             'Device1_Avg_Online_Advertised_Price',\
+                                             'Device1_Display_PhysicalSize',\
+                                             'Device1_BatteryCapacity',\
+                                             'Device1_Chip', \
+                                             'Device1_Chip_Designer_Mfg', \
+                                             'Device1_Number_of_Cores',\
+                                             'Device1_ProcessorSpeed',\
+                                             'Device1_PlanType',\
+                                             'Device1_ScreenSizeBand',\
+                                             'Device1_Avg_Store_Cost_Band',\
+                                             'Device1_Avg_Store_Cost_Band_Custom',\
+                                             'Device2_PurchaseWeek',\
+#                                              'Device2_PurchaseQuarter',\
+                                             F.col('a.Device2_Operator'), \
+                                             F.col('Device2_Operator_Tier'),\
+                                             'Device2_Manufacturer',\
+                                             'Device2_Model',\
+                                             'Device2_OS',\
+                                             'Device2_Smartphone',\
+                                             'Device2_Avg_Store_Cost' , \
+                                             'Device2_Avg_Retail_Price', \
+                                             'Device2_Avg_Full_Cash_Price',\
+                                             'Device2_Avg_Online_Advertised_Price',\
+                                             'Device2_Display_PhysicalSize',\
+                                             'Device2_BatteryCapacity',\
+                                             'Device2_Chip', \
+                                             'Device2_Chip_Designer_Mfg', \
+                                             'Device2_Number_of_Cores',\
+                                             'Device2_ProcessorSpeed',\
+                                             'Device2_PlanType',\
+                                             'Device2_ScreenSizeBand',\
+                                             'Device2_Avg_Store_Cost_Band',\
+                                             'Device2_Avg_Store_Cost_Band_Custom',\
+                                             'a.Quantity','TTU_in_Weeks','GMV_TTU_in_Weeks',\
+                                             'TTU_in_Months',\
+                                             'GMV_TTU')
+
+
+
+# -- Device 2
+# -- Mark the OEMs with lower volume as "Other"
+
+
+  temp3_df = Weekly_CU_Output_df\
+  .groupBy(F.col('Device2_Operator'),F.col('Device2_Manufacturer'))\
+  .agg(F.sum(F.col('Quantity')).alias('Quantity'))
+
+# Updating  OEMs with lower volume as "Other"
+  Weekly_CU_Output_df = Weekly_CU_Output_df.alias('a')\
+  .join(
+    temp3_df.alias('b'),
+    [
+      F.col('a.Device2_Operator') == F.col('b.Device2_Operator'),
+      F.col('a.Device2_Manufacturer') == F.col('b.Device2_Manufacturer')
+    ],'left')\
+  .withColumn('Device2_Manufacturer_updated',
+              F.when((F.col('b.Quantity') < 1000),'Other')\
+              .otherwise(F.col('a.Device2_Manufacturer')))\
+  .withColumn('Device2_Model_updated',
+              F.when((F.col('b.Quantity') < 1000),'Other')\
+              .otherwise(F.col('a.Device2_Model')))\
+  .withColumn('Device2_OS_updated',
+              F.when((F.col('b.Quantity') < 1000),'Other')\
+              .otherwise(F.col('a.Device2_OS'))).select('country',\
+                                             'Device1_PurchaseWeek',\
+                                             'a.Device1_Operator', \
+                                             'Device1_Operator_Tier',\
+                                             F.col('Device1_Manufacturer').alias('Device1_Manufacturer'),\
+                                             F.col('Device1_Model').alias('Device1_Model'),\
+                                             F.col('Device1_OS').alias('Device1_OS'),\
+                                             'Device1_Smartphone',\
+                                             'Device1_Avg_Store_Cost' , \
+                                             'Device1_Avg_Retail_Price', \
+                                             'Device1_Avg_Full_Cash_Price',\
+                                             'Device1_Avg_Online_Advertised_Price',\
+                                             'Device1_Display_PhysicalSize',\
+                                             'Device1_BatteryCapacity',\
+                                             'Device1_Chip', \
+                                             'Device1_Chip_Designer_Mfg', \
+                                             'Device1_Number_of_Cores',\
+                                             'Device1_ProcessorSpeed',\
+                                             'Device1_PlanType',\
+                                             'Device1_ScreenSizeBand',\
+                                             'Device1_Avg_Store_Cost_Band',\
+                                             'Device1_Avg_Store_Cost_Band_Custom',\
+                                             'Device2_PurchaseWeek',\
+#                                              'Device2_PurchaseQuarter',\
+                                             F.col('a.Device2_Operator'), \
+                                             F.col('Device2_Operator_Tier'),\
+                                             F.col('Device2_Manufacturer_updated').alias('Device2_Manufacturer'),\
+                                             F.col('Device2_Model_updated').alias('Device2_Model'),\
+                                             F.col('Device2_OS_updated').alias('Device2_OS'),\
+                                             'Device2_Smartphone',\
+                                             'Device2_Avg_Store_Cost' , \
+                                             'Device2_Avg_Retail_Price', \
+                                             'Device2_Avg_Full_Cash_Price',\
+                                             'Device2_Avg_Online_Advertised_Price',\
+                                             'Device2_Display_PhysicalSize',\
+                                             'Device2_BatteryCapacity',\
+                                             'Device2_Chip', \
+                                             'Device2_Chip_Designer_Mfg', \
+                                             'Device2_Number_of_Cores',\
+                                             'Device2_ProcessorSpeed',\
+                                             'Device2_PlanType',\
+                                             'Device2_ScreenSizeBand',\
+                                             'Device2_Avg_Store_Cost_Band',\
+                                             'Device2_Avg_Store_Cost_Band_Custom',\
+                                             'a.Quantity','TTU_in_Weeks','GMV_TTU_in_Weeks',\
+                                             'TTU_in_Months',\
+                                             'GMV_TTU')
+
+# -- Device 1
+# -- Mark the Models with lower volume as "Other"
+
+
+  temp4_df = Weekly_CU_Output_df\
+  .groupBy(F.col('Device1_Model'))\
+  .agg(F.sum(F.col('Quantity')).alias('Quantity'))
+
+#  Updating  Models with lower volume as "Other"
+  Weekly_CU_Output_df = Weekly_CU_Output_df.alias('a')\
+  .join(
+    temp4_df.alias('b'),
+    [
+      F.col('a.Device1_Model') == F.col('b.Device1_Model')
+    
+    ],'left')\
+  .withColumn('Device1_Model_updated',
+              F.when((F.col('b.Quantity') < 500),'Other')\
+              .otherwise(F.col('a.Device1_Model'))).select('country',\
+                                             'Device1_PurchaseWeek',\
+                                             'a.Device1_Operator', \
+                                             'Device1_Operator_Tier',\
+                                             F.col('Device1_Manufacturer').alias('Device1_Manufacturer'),\
+                                             F.col('Device1_Model_updated').alias('Device1_Model'),\
+                                             F.col('Device1_OS').alias('Device1_OS'),\
+                                             'Device1_Smartphone',\
+                                             'Device1_Avg_Store_Cost' , \
+                                             'Device1_Avg_Retail_Price', \
+                                             'Device1_Avg_Full_Cash_Price',\
+                                             'Device1_Avg_Online_Advertised_Price',\
+                                             'Device1_Display_PhysicalSize',\
+                                             'Device1_BatteryCapacity',\
+                                             'Device1_Chip', \
+                                             'Device1_Chip_Designer_Mfg', \
+                                             'Device1_Number_of_Cores',\
+                                             'Device1_ProcessorSpeed',\
+                                             'Device1_PlanType',\
+                                             'Device1_ScreenSizeBand',\
+                                             'Device1_Avg_Store_Cost_Band',\
+                                             'Device1_Avg_Store_Cost_Band_Custom',\
+                                             'Device2_PurchaseWeek',\
+#                                              'Device2_PurchaseQuarter',\
+                                             F.col('a.Device2_Operator'), \
+                                             F.col('Device2_Operator_Tier'),\
+                                             F.col('Device2_Manufacturer').alias('Device2_Manufacturer'),\
+                                             F.col('Device2_Model').alias('Device2_Model'),\
+                                             F.col('Device2_OS').alias('Device2_OS'),\
+                                             'Device2_Smartphone',\
+                                             'Device2_Avg_Store_Cost' , \
+                                             'Device2_Avg_Retail_Price', \
+                                             'Device2_Avg_Full_Cash_Price',\
+                                             'Device2_Avg_Online_Advertised_Price',\
+                                             'Device2_Display_PhysicalSize',\
+                                             'Device2_BatteryCapacity',\
+                                             'Device2_Chip', \
+                                             'Device2_Chip_Designer_Mfg', \
+                                             'Device2_Number_of_Cores',\
+                                             'Device2_ProcessorSpeed',\
+                                             'Device2_PlanType',\
+                                             'Device2_ScreenSizeBand',\
+                                             'Device2_Avg_Store_Cost_Band',\
+                                             'Device2_Avg_Store_Cost_Band_Custom',\
+                                             'a.Quantity','TTU_in_Weeks','GMV_TTU_in_Weeks',\
+                                             'TTU_in_Months',\
+                                             'GMV_TTU')
+
+
+# -- Device 2
+# -- Mark the Models with lower volume as "Other"
+
+
+  temp5_df = Weekly_CU_Output_df\
+  .groupBy(F.col('Device2_Model'))\
+  .agg(F.sum(F.col('Quantity')).alias('Quantity'))
+
+#  Updating  Models with lower volume as "Other"
+
+  Weekly_CU_Output_df = Weekly_CU_Output_df.alias('a')\
+  .join(
+    temp5_df.alias('b'),
+    [
+      F.col('a.Device2_Model') == F.col('b.Device2_Model')
+    
+    ],'left')\
+  .withColumn('Device2_Model_updated',
+              F.when((F.col('b.Quantity') < 500),'Other')\
+              .otherwise(F.col('a.Device2_Model'))).select('country',\
+                                             'Device1_PurchaseWeek',\
+                                             'a.Device1_Operator', \
+                                             'Device1_Operator_Tier',\
+                                             F.col('Device1_Manufacturer').alias('Device1_Manufacturer'),\
+                                             F.col('Device1_Model').alias('Device1_Model'),\
+                                             F.col('Device1_OS').alias('Device1_OS'),\
+                                             'Device1_Smartphone',\
+                                             'Device1_Avg_Store_Cost' , \
+                                             'Device1_Avg_Retail_Price', \
+                                             'Device1_Avg_Full_Cash_Price',\
+                                             'Device1_Avg_Online_Advertised_Price',\
+                                             'Device1_Display_PhysicalSize',\
+                                             'Device1_BatteryCapacity',\
+                                             'Device1_Chip', \
+                                             'Device1_Chip_Designer_Mfg', \
+                                             'Device1_Number_of_Cores',\
+                                             'Device1_ProcessorSpeed',\
+                                             'Device1_PlanType',\
+                                             'Device1_ScreenSizeBand',\
+                                             'Device1_Avg_Store_Cost_Band',\
+                                             'Device1_Avg_Store_Cost_Band_Custom',\
+                                             'Device2_PurchaseWeek',\
+#                                              'Device2_PurchaseQuarter',\
+                                             F.col('a.Device2_Operator'), \
+                                             F.col('Device2_Operator_Tier'),\
+                                             F.col('Device2_Manufacturer').alias('Device2_Manufacturer'),\
+                                             F.col('Device2_Model_updated').alias('Device2_Model'),\
+                                             F.col('Device2_OS').alias('Device2_OS'),\
+                                             'Device2_Smartphone',\
+                                             'Device2_Avg_Store_Cost' , \
+                                             'Device2_Avg_Retail_Price', \
+                                             'Device2_Avg_Full_Cash_Price',\
+                                             'Device2_Avg_Online_Advertised_Price',\
+                                             'Device2_Display_PhysicalSize',\
+                                             'Device2_BatteryCapacity',\
+                                             'Device2_Chip', \
+                                             'Device2_Chip_Designer_Mfg', \
+                                             'Device2_Number_of_Cores',\
+                                             'Device2_ProcessorSpeed',\
+                                             'Device2_PlanType',\
+                                             'Device2_ScreenSizeBand',\
+                                             'Device2_Avg_Store_Cost_Band',\
+                                             'Device2_Avg_Store_Cost_Band_Custom',\
+                                             'a.Quantity','TTU_in_Weeks','GMV_TTU_in_Weeks',\
+                                             'TTU_in_Months',\
+                                             'GMV_TTU')
+
+
+# # -- Fix OS and Operator
+
+  Weekly_CU_Output_df = Weekly_CU_Output_df.alias('a')\
+  .withColumn("Device1_OS_Update",
+              F.when((F.col('a.Device1_OS').isin('NA', 'Symbian', 'WebOS')==True)|(F.col('a.Device1_OS').isNull()),'Other')\
+              .otherwise(F.col('a.Device1_OS')))\
+  .withColumn("Device2_OS_Update",
+              F.when((F.col('a.Device2_OS').isin('NA', 'Symbian', 'WebOS')==True)|(F.col('a.Device2_OS').isNull()),'Other')\
+              .otherwise(F.col('a.Device2_OS')))\
+  .withColumn("Device1_Operator_Update",
+              F.when((F.col('a.Device1_Operator')== 'Leap Wireless'),'Cricket').otherwise(F.col('a.Device1_Operator')))\
+  .withColumn("Device2_Operator_Update",F.when((F.col('a.Device2_Operator')== 'Leap Wireless'),'Cricket').otherwise(F.col('a.Device2_Operator'))).select('country',\
+                                             'Device1_PurchaseWeek',\
+                                             F.col('Device1_Operator_Update').alias('Device1_Operator'), \
+                                             'Device1_Operator_Tier',\
+                                             F.col('Device1_Manufacturer').alias('Device1_Manufacturer'),\
+                                             F.col('Device1_Model').alias('Device1_Model'),\
+                                             F.col('Device1_OS_Update').alias('Device1_OS'),\
+                                             'Device1_Smartphone',\
+                                             'Device1_Avg_Store_Cost' , \
+                                             'Device1_Avg_Retail_Price', \
+                                             'Device1_Avg_Full_Cash_Price',\
+                                             'Device1_Avg_Online_Advertised_Price',\
+                                             'Device1_Display_PhysicalSize',\
+                                             'Device1_BatteryCapacity',\
+                                             'Device1_Chip', \
+                                             'Device1_Chip_Designer_Mfg', \
+                                             'Device1_Number_of_Cores',\
+                                             'Device1_ProcessorSpeed',\
+                                             'Device1_PlanType',\
+                                             'Device1_ScreenSizeBand',\
+                                             'Device1_Avg_Store_Cost_Band',\
+                                             'Device1_Avg_Store_Cost_Band_Custom',\
+                                             'Device2_PurchaseWeek',\
+#                                              'Device2_PurchaseQuarter',\
+                                             F.col('Device2_Operator_Update').alias('Device2_Operator'), \
+                                             F.col('Device2_Operator_Tier'),\
+                                             F.col('Device2_Manufacturer').alias('Device2_Manufacturer'),\
+                                             F.col('Device2_Model').alias('Device2_Model'),\
+                                             F.col('Device2_OS_Update').alias('Device2_OS'),\
+                                             'Device2_Smartphone',\
+                                             'Device2_Avg_Store_Cost' , \
+                                             'Device2_Avg_Retail_Price', \
+                                             'Device2_Avg_Full_Cash_Price',\
+                                             'Device2_Avg_Online_Advertised_Price',\
+                                             'Device2_Display_PhysicalSize',\
+                                             'Device2_BatteryCapacity',\
+                                             'Device2_Chip', \
+                                             'Device2_Chip_Designer_Mfg', \
+                                             'Device2_Number_of_Cores',\
+                                             'Device2_ProcessorSpeed',\
+                                             'Device2_PlanType',\
+                                             'Device2_ScreenSizeBand',\
+                                             'Device2_Avg_Store_Cost_Band',\
+                                             'Device2_Avg_Store_Cost_Band_Custom',\
+                                             'a.Quantity','TTU_in_Weeks','GMV_TTU_in_Weeks',\
+                                             'TTU_in_Months',\
+                                             'GMV_TTU')
+
+# Removing Canada data from dataframe
+  Weekly_CU_Output_df = Weekly_CU_Output_df.where("country <> 'Canada'")
+  
+     
+  Weekly_CU_Output_df = Weekly_CU_Output_df.dropDuplicates()
+  
+  
+#  Writing output dataframe in output table
+  Weekly_CU_Output_df.write.saveAsTable(CU_Output_output_table, format = 'parquet', mode ='overwrite')
+
+## Loyalty Rate Changes
+
+
+  CU_Output_Weekly_Device_Loyalty_Rate_df = Weekly_CU_Output_df.alias('a')\
+  .groupBy('a.Device1_Manufacturer', 'a.Device1_Avg_Store_Cost_Band_Custom' , 'a.Device2_PurchaseWeek')\
+  .agg(F.sum(F.col('a.Quantity').cast(DoubleType())).alias('Sum_Quantity'),\
+       F.sum(F.when((F.col('a.Device1_Manufacturer') == F.col('a.Device2_Manufacturer')),\
+                    F.col('a.Quantity')).otherwise(F.lit(0))).alias('Sub_Quantity'))
+
+  CU_Output_Weekly_Device_Loyalty_Rate_df = CU_Output_Weekly_Device_Loyalty_Rate_df.select(F.col('Device1_Manufacturer'),\
+                                                                                    F.col('Device1_Avg_Store_Cost_Band_Custom'),\
+                                                                                    F.col('Device2_PurchaseWeek'),\
+                                                                                    (F.col('Sub_Quantity')/F.col('Sum_Quantity')).alias('Loyalty_Rate'))
+
+# /*
+# inserting dummy rows since all manufacturers do not have loyalty rates for devices for all tiers
+# and we want to display all tiers in our output
+# */
+
+  CU_Output_Weekly_Device_Loyalty_Rate_temp = CU_Output_Weekly_Device_Loyalty_Rate_df.select('Device1_Manufacturer','Device1_Avg_Store_Cost_Band_Custom').distinct()
+
+
+  Loyalty_lookup_diff_temp = Device_Loyalty_Store_band_lookup.alias('a')\
+  .join(
+    CU_Output_Weekly_Device_Loyalty_Rate_temp.alias('b'),
+    [
+      F.col('a.Device1_Manufacturer') == F.col('b.Device1_Manufacturer'),
+      F.col('a.Device1_Avg_Store_Cost_Band_Custom') == F.col('b.Device1_Avg_Store_Cost_Band_Custom')
+    ],'left').where("b.Device1_Manufacturer is null and b.Device1_Avg_Store_Cost_Band_Custom is null")\
+  .select('a.*')
+
+  Loyalty_lookup_diff_temp = Loyalty_lookup_diff_temp.withColumn('Device2_PurchaseWeek',F.lit('2014-01-05')).\
+withColumn('Loyalty_Rate', F.lit('Null'))
+
+  CU_Output_Device_Loyalty_Rate_df = CU_Output_Weekly_Device_Loyalty_Rate_df.union(Loyalty_lookup_diff_temp)
+
+#  Writing output dataframe in output table
+  CU_Output_Device_Loyalty_Rate_df.write.saveAsTable(CU_Output_Device_Loyalty_Rate_output_table, format = 'parquet', mode ='overwrite')
+---------------------------------------------------------------------------------------------------------------------------------------
+# Calling the function
+logger.info("CUR Weekly started running.")
+CUR_Weekly(source_table,Device_Loyalty_Store_band_lookup,portal_P1_specs,Lookup_UnitCost_UnitPrice_EIP,output_into_excel_main_weekly, output_into_excel_main_From_2009_df)
+logger.info("CUR Weekly run Successful.")
+---------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------
+# Redshift Upload
+%sql
+-- select distinct Device2_Smartphone from  group_mr.CU_Output_test_df
+drop table if exists group_mr.CU_Weekly_Output_Device_Loyalty_Rate_test_df_v1;
+
+create table group_mr.CU_Weekly_Output_Device_Loyalty_Rate_test_df_v1 
+select Device1_manufacturer,Device1_Avg_Store_Cost_Band_Custom, cast(Device2_PurchaseWeek as Date), (cast(Loyalty_Rate as Double))   as Loyalty_Rate from group_mr.Weekly_CU_Output_Device_Loyalty_Rate where Device2_PurchaseWeek <> '2018-07-08';
+
+drop table if exists group_mr.Weekly_CU_Output_Store_Cost_v2;
+
+create table group_mr.Weekly_CU_Output_Store_Cost_v2
+select * from group_mr.Weekly_CU_Output_Store_Cost_v1
+where Device2_PurchaseWeek <> '2018-07-08';
+--------------------------------
+table_name_on_s3 = 'group_mr.Weekly_CU_Output_Store_Cost_v2'
+table_name_on_redshift = 'mr.Weekly_CU_Output'
+
+jdburl = "jdbc:redshift://redshiftprod01.cuju3qgp8oot.us-east-1.redshift.amazonaws.com:5439/nile?user=mr_user&password=TisIsyou2341"
+table_to_upload_df = spark.table(table_name_on_s3)
+table_to_upload_df.write\
+        .format('com.databricks.spark.redshift') \
+        .option('url', jdburl)\
+        .option('dbtable', table_name_on_redshift)\
+        .option('tempdir', 's3://mscience-tmp/')\
+        .option('aws_iam_role', 'arn:aws:iam::213585113823:role/RedshiftSpectrumRole') \
+        .option('autoenablessl', 'false') \
+        .option("postactions", "grant select on " + table_name_on_redshift + " to group mr_group;")\
+        .mode('overwrite') \
+        .save()
+        
+------------------------
+table_name_on_s3 = 'group_mr.CU_Weekly_Output_Device_Loyalty_Rate_test_df_v1'
+table_name_on_redshift = 'mr.CU_Weekly_Output_Device_Loyalty_Rate'
+
+jdburl = "jdbc:redshift://redshiftprod01.cuju3qgp8oot.us-east-1.redshift.amazonaws.com:5439/nile?user=mr_user&password=TisIsyou2341"
+table_to_upload_df = spark.table(table_name_on_s3)
+table_to_upload_df.write\
+        .format('com.databricks.spark.redshift') \
+        .option('url', jdburl)\
+        .option('dbtable', table_name_on_redshift)\
+        .option('tempdir', 's3://mscience-tmp/')\
+        .option('aws_iam_role', 'arn:aws:iam::213585113823:role/RedshiftSpectrumRole') \
+        .option('autoenablessl', 'false') \
+        .option("postactions", "grant select on " + table_name_on_redshift + " to group mr_group;")\
+        .mode('overwrite') \
+        .save()
+---------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------
+# CUR Weekly price hot fix
+# Hot Fix  Device 2 Avg Store Cost
+
+import pyspark.sql.functions as F
+
+Weekly_CU_Output_with_price = spark.table("group_mr.Weekly_CU_Output").where("Device2_PurchaseWeek <=(select max(Week_Starting) from group_mr.output_into_excel_main_weekly)")
+
+Weekly_CU_Output_to_be_updated_with_price = spark.table("group_mr.Weekly_CU_Output").where("Device2_PurchaseWeek >(select max(Week_Starting) from group_mr.output_into_excel_main_weekly)")
+
+Weekly_CU_Output_lookup = spark.table("group_mr.Weekly_CU_Output").where("Device2_PurchaseWeek = (select max(Week_Starting) from group_mr.output_into_excel_main_weekly)").select('Device2_Operator','Device2_Manufacturer','Device2_Model','Device2_Avg_Store_Cost','Device2_Avg_Retail_Price','Device2_Avg_Full_Cash_Price'  ,'Device2_Avg_Online_Advertised_Price').distinct()
+
+Weekly_CU_Output_join_1 = Weekly_CU_Output_to_be_updated_with_price.alias('a')\
+.join(Weekly_CU_Output_lookup.alias('b'),
+     [
+
+       F.col('a.Device2_Operator') == F.col('b.Device2_Operator'),
+       F.col('a.Device2_Manufacturer') == F.col('b.Device2_Manufacturer'),
+       F.col('a.Device2_Model') == F.col('b.Device2_Model')
+
+     ],
+     'left')\
+.withColumn('Device2_Avg_Store_Cost_update',F.coalesce(F.col('a.Device2_Avg_Store_Cost'),F.col('b.Device2_Avg_Store_Cost')))\
+.withColumn('Device2_Avg_Retail_Price_update',F.coalesce(F.col('a.Device2_Avg_Retail_Price'),F.col('b.Device2_Avg_Retail_Price')))\
+.withColumn('Device2_Avg_Full_Cash_Price_update',F.coalesce(F.col('a.Device2_Avg_Full_Cash_Price'),F.col('b.Device2_Avg_Full_Cash_Price')))\
+.withColumn('Device2_Avg_Online_Advertised_Price_update',F.coalesce(F.col('a.Device2_Avg_Online_Advertised_Price'),F.col('b.Device2_Avg_Online_Advertised_Price')))\
+.select('a.country',\
+                                             'a.Device1_PurchaseWeek',\
+                                             F.col('a.Device1_Operator').alias('Device1_Operator'), \
+                                             'a.Device1_Operator_Tier',\
+                                             F.col('a.Device1_Manufacturer').alias('Device1_Manufacturer'),\
+                                             F.col('a.Device1_Model').alias('Device1_Model'),\
+                                             F.col('a.Device1_OS').alias('Device1_OS'),\
+                                             'a.Device1_Smartphone',\
+                                             'a.Device1_Avg_Store_Cost' , \
+                                             'a.Device1_Avg_Retail_Price', \
+                                             'a.Device1_Avg_Full_Cash_Price',\
+                                             'a.Device1_Avg_Online_Advertised_Price',\
+                                             'a.Device1_Display_PhysicalSize',\
+                                             'a.Device1_BatteryCapacity',\
+                                             'a.Device1_Chip', \
+                                             'a.Device1_Chip_Designer_Mfg', \
+                                             'a.Device1_Number_of_Cores',\
+                                             'a.Device1_ProcessorSpeed',\
+                                             'a.Device1_PlanType',\
+                                             'a.Device1_ScreenSizeBand',\
+                                             'a.Device1_Avg_Store_Cost_Band',\
+                                             'a.Device1_Avg_Store_Cost_Band_Custom',\
+                                             'a.Device2_PurchaseWeek',\
+#                                              'Device2_PurchaseQuarter',\
+                                             F.col('a.Device2_Operator').alias('Device2_Operator'), \
+                                             F.col('a.Device2_Operator_Tier'),\
+                                             F.col('a.Device2_Manufacturer').alias('Device2_Manufacturer'),\
+                                             F.col('a.Device2_Model').alias('Device2_Model'),\
+                                             F.col('a.Device2_OS').alias('Device2_OS'),\
+                                             'a.Device2_Smartphone',\
+                                             F.col('Device2_Avg_Store_Cost_update').alias('Device2_Avg_Store_Cost') , \
+                                             F.col('Device2_Avg_Retail_Price_update').alias('Device2_Avg_Retail_Price'), \
+                                             F.col('Device2_Avg_Full_Cash_Price_update').alias('Device2_Avg_Full_Cash_Price'),\
+                                             F.col('Device2_Avg_Online_Advertised_Price_update').alias('Device2_Avg_Online_Advertised_Price'),\
+                                             'a.Device2_Display_PhysicalSize',\
+                                             'a.Device2_BatteryCapacity',\
+                                             'a.Device2_Chip', \
+                                             'a.Device2_Chip_Designer_Mfg', \
+                                             'a.Device2_Number_of_Cores',\
+                                             'a.Device2_ProcessorSpeed',\
+                                             'a.Device2_PlanType',\
+                                             'a.Device2_ScreenSizeBand',\
+                                             'a.Device2_Avg_Store_Cost_Band',\
+                                             'a.Device2_Avg_Store_Cost_Band_Custom',\
+                                             'a.Quantity','a.TTU_in_Weeks','a.GMV_TTU_in_Weeks',\
+                                             'a.TTU_in_Months',\
+                                             'a.GMV_TTU')
+
+
+Weekly_CU_Output_test_df = Weekly_CU_Output_with_price.union(Weekly_CU_Output_join_1)
+
+
+
+Weekly_CU_Output_test_df = Weekly_CU_Output_test_df.alias('a')\
+.withColumn("Device1_Avg_Store_Cost_Band",F.when((F.col('a.Device1_Avg_Store_Cost'))< 150,'Low Tier (<$150)')\
+            .when(((F.col('a.Device1_Avg_Store_Cost'))>= 150) & ((F.col('a.Device1_Avg_Store_Cost'))< 450),'Mid Tier ($150-$449)')\
+            .when(((F.col('a.Device1_Avg_Store_Cost'))>= 450) & ((F.col('a.Device1_Display_PhysicalSize'))< 5.5),'Premium Tier (Cost >= $450 and Display Size < 5.5)')\
+            .when(((F.col('a.Device1_Avg_Store_Cost'))>= 450) & ((F.col('a.Device1_Display_PhysicalSize'))>= 5.5),'Super Premium Tier (Cost >= $450 and Display Size >= 5.5)').otherwise('NA'))\
+.withColumn("Device1_Avg_Store_Cost_Band_Custom",F.when((F.col('a.Device1_Avg_Store_Cost'))< 100,'Band 1) Low Tier (<$100)')\
+            .when((F.col('a.Device1_Avg_Store_Cost'))< 200,'Band 2) Mid Tier ($100-$199.99)')\
+            .when((F.col('a.Device1_Avg_Store_Cost'))< 400,'Band 3) High Tier ($200-$400.00)')\
+            .when((F.col('a.Device1_Avg_Store_Cost')) >= 400,'Band 4) Premium Tier ($400 and above)').otherwise('NA'))\
+.withColumn("Device2_Avg_Store_Cost_Band",F.when((F.col('a.Device2_Avg_Store_Cost'))< 150,'Low Tier (<$150)')\
+            .when(((F.col('a.Device2_Avg_Store_Cost'))>= 150) & ((F.col('a.Device2_Avg_Store_Cost'))< 450),'Mid Tier ($150-$449)')\
+            .when(((F.col('a.Device2_Avg_Store_Cost'))>= 450) & ((F.col('a.Device2_Display_PhysicalSize'))< 5.5),'Premium Tier (Cost >= $450 and Display Size < 5.5)')\
+            .when(((F.col('a.Device2_Avg_Store_Cost'))>= 450) & ((F.col('a.Device2_Display_PhysicalSize'))>= 5.5),'Super Premium Tier (Cost >= $450 and Display Size >= 5.5)').otherwise('NA'))\
+.withColumn("Device2_Avg_Store_Cost_Band_Custom",F.when((F.col('a.Device2_Avg_Store_Cost'))< 100,'Band 1) Low Tier (<$100)')\
+            .when((F.col('a.Device2_Avg_Store_Cost'))< 200,'Band 2) Mid Tier ($100-$199.99)')\
+            .when((F.col('a.Device2_Avg_Store_Cost'))< 400,'Band 3) High Tier ($200-$400.00)')\
+            .when((F.col('a.Device2_Avg_Store_Cost')) >= 400,'Band 4) Premium Tier ($400 and above)').otherwise('NA'))
+
+Weekly_CU_Output_test_df.dropDuplicates()
+Weekly_CU_Output_test_df.write.saveAsTable('group_mr.Weekly_CU_Output_Store_Cost_v1', format = 'parquet', mode ='overwrite')
+---------------------------------------------------------------------------------------------------------------------------------------
