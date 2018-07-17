@@ -1,0 +1,126 @@
+#  Purpose     :   To build weekly/monthly handset report
+#  Input(s)    :   Aggregator tables and Portal tables
+#  Ouput(s)    :   Monthly or Weekly Report
+#  Developer   :   Kumar Saurabh (Kumar.Saurabh@mscience.com)
+#  Date        :   05/14/2018
+#  Description :   Calling each module & create final Monthly/ Weekly report
+------------------------------------------------------------------------------------------------------------------------------------------
+# Start Logging
+import datetime as D
+today = D.datetime.today()
+
+import logging
+logger = logging.getLogger(__name__)
+LogFile = "HRG_log_" + str(today) + ".log";
+
+# Get a file handler (to print to a log file) and a stream handler (to print to the screen)
+file_handler = logging.FileHandler(LogFile)
+stream_handler = logging.StreamHandler()
+
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
+
+# Format
+formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(module)s: %(message)s')
+file_handler.setFormatter(formatter)
+stream_handler.setFormatter(formatter)
+
+# Set log level - INFO fine for now
+logger.setLevel(logging.INFO)
+---------------------------------------------------------------------------------------------------------------------------------------
+%sql
+
+refresh table group_mr.HRG_input;
+---------------------------------------------------------------------------------------------------------------------------------------
+import pyspark.sql.functions as F
+import pyspark.sql.types as T
+import pyspark.sql.window as W
+
+  
+# Defining variables - update table name here if needed
+HRG_input_table = spark.table('group_mr.HRG_input')
+# HRG_config_table = spark.table('group_mr.HRG_input_table')
+# Report_Type = 'Weekly'
+# display(HRG_input_table)
+ReportType = HRG_input_table.where("Module = 'Report Type'").select('choice').collect()[0]
+Rebuild_Dashboard_Tables = HRG_input_table.where("Module = 'Dropping MM3 dashboard'").select('choice').collect()[0]
+Supporter_flag = HRG_input_table.where("Module = 'Supporter'").select('choice').collect()[0]
+Algo_flag = HRG_input_table.where("Module = 'Algo'").select('choice').collect()[0]
+Aggregator_flag = HRG_input_table.where("Module = 'Aggregator'").select('choice').collect()[0]
+Output_flag = HRG_input_table.where("Module = 'Output'").select('choice').collect()[0]
+Run_MM1 = HRG_input_table.where("Module = 'Run MM1'").select('choice').collect()[0]
+Run_Apple = HRG_input_table.where("Module = 'Run Apple'").select('choice').collect()[0]
+Run_MM3 = HRG_input_table.where("Module = 'Run MM3'").select('choice').collect()[0]
+Week_Start = HRG_input_table.where("Module = 'Week Start'").select('choice').collect()[0]
+Week_End = HRG_input_table.where("Module = 'Week End'").select('choice').collect()[0]
+Month_Start = HRG_input_table.where("Module = 'Month Start'").select('choice').collect()[0]
+Month_End = HRG_input_table.where("Module = 'Month End'").select('choice').collect()[0]
+start_date_for_supporting_lookups = HRG_input_table.where("Module = 'Start Date For Supporting Lookup'").select('choice').collect()[0]
+
+# Refresh input tables and load functions
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Supporter/Phase 2/HRG_Supporter_V2"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Algo/HRG Algo"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Aggregator/Aggregator"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Output/Phase 2: HRG enhancements/HRG Output_V2"
+---------------------------------------------------------------------------------------------------------------------------------------
+def HRG():
+ 
+  logger.info('Handset Report Generator Welcomes You.')
+  logger.info('\nHRG : Reading input file...')
+  
+  HRG_Wrapper = False
+  
+# Calling Supporter module
+  if Supporter_flag[0] == '1':
+    logger.info("\nHRG : Running Supporter module...")
+#     supporter()
+    Function_Status = supporter(ReportType[0],start_date_for_supporting_lookups[0])
+    if Function_Status == True:
+      logger.info("\nHRG : done")
+    if Function_Status == False:
+      logger.info("\nHRG : failed")
+  
+# Calling Algo module
+  if Algo_flag[0] == '1':
+    logger.info("\nHRG : Running Algo module...")
+    Function_Status = Algo(ReportType[0], Rebuild_Dashboard_Tables[0], Run_MM1[0], Run_Apple[0], Run_MM3[0], Week_Start[0], Week_End[0], Month_Start[0], Month_End[0])
+    if Function_Status == True:
+      logger.info("\nHRG : done")
+    if Function_Status == False:
+      logger.info("\nHRG : failed")
+
+# Calling Aggregator module
+  if Aggregator_flag[0] == '1':
+    logger.info("\nHRG : Running Aggregator module...")
+    Function_Status = aggregator(ReportType[0])
+    if Function_Status == True:
+      logger.info("\nHRG : done")
+    if Function_Status == False:
+      logger.info("\nHRG : failed")
+
+# Calling Output module
+  if Output_flag[0] == '1':
+    logger.info("\nHRG : Running Output module...")
+    Function_Status = Output(ReportType[0])
+#     Output(ReportType[0],Aggregated_Monthly_df)
+    if Function_Status == True:
+      logger.info("\nHRG : done")
+    if Function_Status == False:
+      logger.info("\nHRG : failed")
+      
+      
+  HRG_Wrapper = True
+  return HRG_Wrapper
+---------------------------------------------------------------------------------------------------------------------------------------
+# Call the HRG Wrapper Script
+
+Function_Status = HRG()
+if Function_Status == True:
+  logger.info("\nHRG : All operations complete. ")
+if Function_Status == False:
+  logger.info("\nHRG : failed. ")
+---------------------------------------------------------------------------------------------------------------------------------------
