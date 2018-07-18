@@ -1,0 +1,187 @@
+#  Purpose      :   To aggregate scaled up #s & create aggregated final table
+#  Input(s)     :   Algo output, MM1 and Apple #
+#  Ouput(s)     :   Final scaled up quantites for all models
+#  Developer    :   Kumar Saurabh (Kumar.Saurabh@mscience.com)
+#  Date         :   04/17/2018
+#  Description  :   Creating table for MM1 scaled numbers at model level; Bringing all 3 tables (MM1 numbers, Apple numbers & MM3 numbers) in defined structre & aggregate them on monthly/ weekly level. Create restatement table with last published MHR & aggregated table
+---------------------------------------------------------------------------------------------------------------------------------------
+import pyspark.sql.functions as F
+import pyspark.sql.types as T
+import pyspark.sql.window as W
+
+# Defining variables - update table name here if needed
+# Read config table
+HRG_aggregator_config_table = 'group_mr.HRG_Aggregator_Config_Table'
+
+# Refresh input tables and load functions
+---------------------------------------------------------------------------------------------------------------------------------------
+%sql
+
+refresh table group_mr.HRG_Aggregator_Config_Table;
+
+-- uploading config file & parameter list in a separate notebook, check if read.csv can be used, csv will be in S3
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Aggregator/HRG_Monthly_MM1_Model_Quantity_Split"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Aggregator/HRG_Weekly_MM1_Model_Quantity_Split"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Aggregator/HRG_Monthly_MM3_Output"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Aggregator/HRG_Weekly_MM3_Output"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Aggregator/HRG_Monthly_Agg"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Aggregator/HRG_Weekly_Agg"
+---------------------------------------------------------------------------------------------------------------------------------------
+def aggregator(Report_Type):
+  logger.info('HRG Aggregator Module Welcomes You.')
+  
+  logger.info('\nHRG Aggregator: Executing based on config table...')
+  Function_Status = False
+  
+  logger.info('\nHRG Supporter: Reading config table...')
+  config_table = spark.table(HRG_aggregator_config_table)
+  logger.info("done")
+  
+  # Get values 
+  Parser_Output_Table = config_table.where("Field = 'Parser Output Table' and Type = 'Table Name'")\
+                        .select('Field_Detail').collect()[0]
+  HRG_Monthly_Dashboard_Table = config_table.where("Field = 'Dashboard Table Monthly' and Type = 'Table Name'")\
+                        .select('Field_Detail').collect()[0]
+  HRG_Weekly_Dashboard_Table = config_table.where("Field = 'Dashboard Table Weekly' and Type = 'Table Name'")\
+                        .select('Field_Detail').collect()[0]
+  HRG_Monthly_High_Level_Input_File = config_table.where("Field = 'High Level Input File Monthly' and Type = 'Table Name'")\
+                        .select('Field_Detail').collect()[0]
+  HRG_Weekly_High_Level_Input_File = config_table.where("Field = 'High Level Input File Weekly' and Type = 'Table Name'")\
+                        .select('Field_Detail').collect()[0]
+  HRG_Monthly_Apple_File = config_table.where("Field = 'Monthly Apple File' and Type = 'Table Name'")\
+                        .select('Field_Detail').collect()[0]
+  HRG_Weekly_Apple_File = config_table.where("Field = 'Weekly Apple File' and Type = 'Table Name'")\
+                        .select('Field_Detail').collect()[0]
+  HRG_monthly_output = config_table.where("Field = 'HRG Monthly Output' and Type = 'Table Name'")\
+                        .select('Field_Detail').collect()[0]
+  HRG_weekly_output = config_table.where("Field = 'HRG Weekly Output' and Type = 'Table Name'")\
+                        .select('Field_Detail').collect()[0]
+
+  # Converting table names into dataframes
+  config_table = spark.table(HRG_aggregator_config_table)
+  Parser_Output_Table_df = spark.table(Parser_Output_Table[0])
+  HRG_Monthly_Dashboard_Table_df = spark.table(HRG_Monthly_Dashboard_Table[0])
+  HRG_Weekly_Dashboard_Table_df = spark.table(HRG_Weekly_Dashboard_Table[0])
+  HRG_Monthly_High_Level_Input_File_df = spark.table(HRG_Monthly_High_Level_Input_File[0])
+  HRG_Weekly_High_Level_Input_File_df = spark.table(HRG_Weekly_High_Level_Input_File[0])
+  HRG_Monthly_Apple_File_df = spark.table(HRG_Monthly_Apple_File[0])
+  HRG_Weekly_Apple_File_df = spark.table(HRG_Weekly_Apple_File[0])
+  HRG_monthly_output_df = spark.table(HRG_monthly_output[0])
+  HRG_weekly_output_df = spark.table(HRG_weekly_output[0])
+
+  
+#################### Calling function to create MM3 Dashboard Table ####################
+
+  # Creating Monthly Table
+  if Report_Type == 'Monthly' and HRG_Monthly_Dashboard_Table_df.count() <> 0:
+    logger.info("\nHRG Aggregator: Creating Dashboard Table Monthly & fetching numbers...")
+    HRG_Monthly_MM3_Output_df = HRG_Monthly_MM3_Output(HRG_Monthly_Dashboard_Table_df)
+    count_mm3_monthly = HRG_Monthly_MM3_Output_df.count()
+    if count_mm3_monthly <> 0:
+      logger.info("done")
+    if count_mm3_monthly == 0:
+      logger.info("failed")
+  if Report_Type == 'Monthly' and HRG_Monthly_Dashboard_Table_df.count() == 0:
+    logger.info("\nHRG Aggregator: failed; MM3 dashboard is empty, please check & rerun...")
+
+
+  # Creating Weekly Table
+  if Report_Type == 'Weekly' and HRG_Weekly_Dashboard_Table_df.count() <> 0:
+    logger.info("\nHRG Aggregator: Creating Dashboard Table Weekly & fetching numbers...")
+    HRG_Weekly_MM3_Output_df = HRG_Weekly_MM3_Output(HRG_Weekly_Dashboard_Table_df)
+    count_mm3_weekly = HRG_Weekly_MM3_Output_df.count()
+    if count_mm3_weekly <> 0:
+      logger.info("done")
+    if count_mm3_weekly == 0:
+      logger.info("failed")
+  if Report_Type == 'Weekly' and HRG_Weekly_Dashboard_Table_df.count() == 0:
+    logger.info("\nHRG Aggregator: failed; MM3 dashboard is empty, please check & rerun...")
+    
+#######################################################################################
+  
+#################### Calling function to create MM1  Table ####################
+
+  # Creating Monthly Table
+  if Report_Type == 'Monthly' and Parser_Output_Table_df.count() <> 0 and HRG_Monthly_High_Level_Input_File_df.count() <> 0:
+    logger.info("\nHRG Aggregator: Running function to get MM1 scaled quantities...")
+    HRG_Monthly_MM1_Quantities_df = HRG_Monthly_MM1_Model_Quantity_Split(Parser_Output_Table_df,HRG_Monthly_High_Level_Input_File_df)
+    count_mm1_monthly = HRG_Monthly_MM1_Quantities_df.count()
+    if count_mm1_monthly <> 0:
+      logger.info("done")
+    if count_mm1_monthly == 0:
+      logger.info("failed")
+  if Report_Type == 'Monthly' and Parser_Output_Table_df.count() == 0 and HRG_Monthly_High_Level_Input_File_df.count() <> 0:
+    logger.info("\nHRG Aggregator: failed; Parser_Output_Table is empty, please check & rerun...")
+  if Report_Type == 'Monthly' and Parser_Output_Table_df.count() <> 0 and HRG_Monthly_High_Level_Input_File_df.count() == 0:
+    logger.info("\nHRG Aggregator: failed; High_Level_Input_File is empty, please check & rerun...")
+  if Report_Type == 'Monthly' and Parser_Output_Table_df.count() == 0 and HRG_Monthly_High_Level_Input_File_df.count() == 0:
+    logger.info("\nHRG Aggregator: failed; Parser_Output_Table & High_Level_Input_File are empty, please check & rerun...")
+  
+  
+  # Creating Weekly Table
+  if Report_Type == 'Weekly' and Parser_Output_Table_df.count() <> 0 and HRG_Weekly_High_Level_Input_File_df.count() <> 0:
+    logger.info("\nHRG Aggregator: Running function to get MM1 scaled quantities...")
+    HRG_Weekly_MM1_Quantities_df = HRG_Weekly_MM1_Model_Quantity_Split(Parser_Output_Table_df,HRG_Weekly_High_Level_Input_File_df)
+    count_mm1_weekly = HRG_Weekly_MM1_Quantities_df.count()
+    if count_mm1_weekly <> 0:
+      logger.info("done")
+    if count_mm1_weekly == 0:
+      logger.info("failed")
+  if Report_Type == 'Weekly' and Parser_Output_Table_df.count() == 0 and HRG_Weekly_High_Level_Input_File_df.count() <> 0:
+    logger.info("\nHRG Aggregator: failed; Parser_Output_Table is empty, please check & rerun...")
+  if Report_Type == 'Weekly' and Parser_Output_Table_df.count() <> 0 and HRG_Weekly_High_Level_Input_File_df.count() == 0:
+    logger.info("\nHRG Aggregator: failed; High_Level_Input_File is empty, please check & rerun...")
+  if Report_Type == 'Weekly' and Parser_Output_Table_df.count() == 0 and HRG_Weekly_High_Level_Input_File_df.count() == 0:
+    logger.info("\nHRG Aggregator: failed; Parser_Output_Table & High_Level_Input_File are empty, please check & rerun...")
+
+#######################################################################################
+  
+#################### Calling function to create Aggregated Table ####################
+
+  # Creating Monthly Table
+  if Report_Type == 'Monthly' and HRG_Monthly_Apple_File_df.count() <> 0 and HRG_Monthly_MM3_Output_df.count() <> 0 and HRG_Monthly_MM1_Quantities_df.count() <> 0 and HRG_monthly_output_df.count() <> 0 :
+    logger.info("\nHRG Aggregator: Creating Aggregated Monthly table...")
+    HRG_Monthly_Aggregated_df = HRG_Monthly_Agg(HRG_Monthly_Apple_File_df,HRG_Monthly_MM3_Output_df,HRG_Monthly_MM1_Quantities_df,HRG_monthly_output_df)
+    count_aggregated_monthly = HRG_Monthly_Aggregated_df.count()
+    if count_aggregated_monthly <> 0:
+      HRG_Monthly_Aggregated_df.write.saveAsTable('group_mr.HRG_Monthly_Aggregated_Quantities',format='parquet',mode = 'overwrite') 
+      logger.info("done")
+    if count_aggregated_monthly == 0:
+      logger.info("failed")
+  if Report_Type == 'Monthly' and (HRG_Monthly_Apple_File_df.count() == 0 or HRG_Monthly_MM3_Output_df.count() == 0 or HRG_Monthly_MM1_Quantities_df.count() == 0 or HRG_monthly_output_df.count() == 0):
+    if HRG_Monthly_Apple_File_df.count() == 0 : logger.info("\nHRG Aggregator: failed; Apple_File is empty, please check & rerun...")
+    if HRG_Monthly_MM3_Output_df.count() == 0 : logger.info("\nHRG Aggregator: failed; MM3_Output is empty, please check & rerun...")
+    if HRG_Monthly_MM1_Quantities_df.count() == 0 : logger.info("\nHRG Aggregator: failed; MM1_Quantities is empty, please check & rerun...")
+    if HRG_monthly_output_df.count() == 0 : logger.info("\nHRG Aggregator: failed; monthly_output is empty, please check & rerun...")
+
+
+  # Creating Weekly Table
+  if Report_Type == 'Weekly' and HRG_Weekly_Apple_File_df.count() <> 0 and HRG_Weekly_MM3_Output_df.count() <> 0 and HRG_Weekly_MM1_Quantities_df.count() <> 0 and HRG_weekly_output_df.count() <> 0:
+    logger.info("\nHRG Aggregator: Creating Aggregated Weekly table...")
+    HRG_Weekly_Aggregated_df = HRG_Weekly_Agg(HRG_Weekly_Apple_File_df,HRG_Weekly_MM3_Output_df,HRG_Weekly_MM1_Quantities_df,HRG_weekly_output_df)
+    count_aggregated_weekly = HRG_Weekly_Aggregated_df.count()
+    if count_aggregated_weekly <> 0:
+      HRG_Weekly_Aggregated_df.write.saveAsTable('group_mr.HRG_Weekly_Aggregated_Quantities',format='parquet',mode = 'overwrite') 
+      logger.info("done")
+    if count_aggregated_weekly == 0:
+      logger.info("failed")
+  if Report_Type == 'Weekly' and (HRG_Weekly_Apple_File_df.count() == 0 or HRG_Weekly_MM3_Output_df.count() == 0 or HRG_Weekly_MM1_Quantities_df.count() == 0 or HRG_weekly_output_df.count() == 0):
+    if HRG_Weekly_Apple_File_df.count() == 0 : logger.info("\nHRG Aggregator: failed; Apple_File is empty, please check & rerun...")
+    if HRG_Weekly_MM3_Output_df.count() == 0 : logger.info("\nHRG Aggregator: failed; MM3_Output is empty, please check & rerun...")
+    if HRG_Weekly_MM1_Quantities_df.count() == 0 : logger.info("\nHRG Aggregator: failed; MM1_Quantities is empty, please check & rerun...")
+    if HRG_weekly_output_df.count() == 0 : logger.info("\nHRG Aggregator: failed; weekly_output is empty, please check & rerun...")
+      
+      
+#######################################################################################
+
+
+  logger.info("\nHRG Aggregator: All operations complete.")
+  Function_Status = True
+  return Function_Status
+---------------------------------------------------------------------------------------------------------------------------------------
