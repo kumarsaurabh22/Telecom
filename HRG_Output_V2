@@ -1,0 +1,137 @@
+#  Purpose     :   To prepare the final output table 
+#  Input(s)    :   Aggregator tables and Portal tables
+#  Ouput(s)    :   Output Into Excel Main tables (group_mr.HRG_Monthly_Output_Into_Excel_Main and group_mr.HRG_Weekly_Output_Into_Excel_Main)
+#  Developer   :   Aritra Banerjee (Aritra.Banerjee@mscience.com)
+#  Date        :   04/27/2018
+#  Description :   Aggregating the quantities at monthly/weekly level and attaching the P1/P2 specs and the prices from the
+#                  portal tables to generate the final output for MHR/WHR
+---------------------------------------------------------------------------------------------------------------------------------------
+import pyspark.sql.functions as F
+import pyspark.sql.types as T
+import pyspark.sql.window as W
+
+  
+# Defining variables - update table name here if needed
+HRG_output_config_table = 'group_mr.HRG_Output_Config_Table'
+# Report_Type = 'Monthly'
+
+
+# Refresh input tables and load functions
+---------------------------------------------------------------------------------------------------------------------------------------
+%sql
+
+refresh table group_mr.HRG_Output_Config_Table;
+
+-- uploading config file & parameter list in a separate notebook, check if read.csv can be used, csv will be in S3
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/PortalTables/HRG_Load_Portal_Tables"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Output/HRG_Final_Quantity_Table_Cleanup_Monthly"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Output/HRG_Final_Quantity_Table_Cleanup_Weekly"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Output/Phase 2: HRG enhancements/HRG_Monthly_Output_Aggregator_V2"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Output/Phase 2: HRG enhancements/HRG_Weekly_Output_Aggregator_V3"
+---------------------------------------------------------------------------------------------------------------------------------------
+
+def Output(Report_Type):
+ 
+  logger.info('HRG Output Module Welcomes You.')
+  
+  # Read config table
+  logger.info('\nHRG Output: Reading config table...')
+  config_table = spark.table(HRG_output_config_table)
+  logger.info("done")
+  
+  logger.info('\nHRG Output: Fetching the required values...')
+  # Get values 
+  Scaled_Quantities_Table_Monthly = config_table.where("Field = 'Scaled Quantities Table Monthly' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Scaled_Quantities_Table_Weekly = config_table.where("Field = 'Scaled Quantities Table Weekly' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Scaled_Quantities_Table_Monthly_Cleaned = config_table.where("Field = 'Scaled Quantities Table Monthly Cleaned' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Scaled_Quantities_Table_Weekly_Cleaned = config_table.where("Field = 'Scaled Quantities Table Weekly Cleaned' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  StoreCost_RetailPrice_lkp_Monthly = config_table.where("Field = 'StoreCost_RetailPrice_Lookup_Monthly' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  StoreCost_RetailPrice_lkp_Weekly = config_table.where("Field = 'StoreCost_RetailPrice_Lookup_Weekly' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  P1_Parameter_lkp = config_table.where("Field = 'P1 Parameter Lookup' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  P2_Parameter_lkp = config_table.where("Field = 'P2 Parameter Lookup' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  PhonePrice_lkp = config_table.where("Field = 'PhonePrice Lookup' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+#   Monthly_Output_Table = config_table.where("Field = 'Monthly Output Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+#   Weekly_Output_Table = config_table.where("Field = 'Weekly Output Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Phone_Model_With_Alias_Table = config_table.where("Field = 'Portal_PhoneModelWithAlias_Lookup' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+#   Monthly_Output_Table_Columns = config_table.where("Field = 'Monthly Output Table' and Type = 'Column Name' and Switch = '1'").select('Field_Detail').collect()[0]
+#   Weekly_Output_Table_Columns = config_table.where("Field = 'Weekly Output Table' and Type = 'Column Name' and Switch = '1'").select('Field_Detail').collect()[0]
+#   Aggregator_Table_Monthly = config_table.where("Field = 'Aggregator Table Monthly' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+#   Aggregator_Table_Weekly = config_table.where("Field = 'Aggregator Table Weekly' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+#   logger.info("done")
+
+  StoreCost_Lookup_Monthly = config_table.where("Field = 'StoreCost Lookup Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  RetailPrice_Lookup_Monthly = config_table.where("Field = 'RetailPrice Lookup Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Activation_Lookup_Monthly = config_table.where("Field = 'Activation Lookup Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  DeviceSpecification_Lookup_Monthly = config_table.where("Field = 'DeviceSpecification Lookup Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  
+#   Load the Portal Tables
+  logger.info('\nHRG Output: Loading the portal tables...')
+  
+  Portal_P1_Parameter = HRG_Load_Portal_Tables(P1_Parameter_lkp[0])
+  Portal_P2_Parameter = HRG_Load_Portal_Tables(P2_Parameter_lkp[0])
+  Portal_PhonePrice = HRG_Load_Portal_Tables(PhonePrice_lkp[0])
+  Portal_Phone_Model_With_Alias = HRG_Load_Portal_Tables(Phone_Model_With_Alias_Table[0])
+  
+  logger.info("done")
+  
+  
+  logger.info('\nHRG Output: Executing based on config table...')
+  
+#   # Copy data from Restatement sheet to Scaled Quantities Table
+#   logger.info("\nHRG Output: Creating scaled quantities table...")
+#   if Report_Type == 'Monthly':
+#     Function_Status = HRG_Create_Scaled_Quantities_Table_Monthly(Scaled_Quantities_Table_Monthly[0], Aggregator_Table_Monthly[0])
+#     if Function_Status == True:
+#       logger.info("done")
+#     if Function_Status == False:
+#       logger.info("failed")
+#   if Report_Type == 'Weekly':
+#     Function_Status = HRG_Create_Scaled_Quantities_Table_Weekly(Scaled_Quantities_Table_Weekly[0], Aggregator_Table_Weekly[0])
+#     if Function_Status == True:
+#       logger.info("done")
+#     if Function_Status == False:
+#       logger.info("failed")
+  
+#   Clean the Scaled Quantities table before aggregating the quantities
+  logger.info("\nHRG Output: Cleaning the scaled quantities table...")
+  if Report_Type == 'Monthly':
+    Final_Scaled_Quantities_Table_Monthly = HRG_Final_Quantity_Table_Cleanup_Monthly(Scaled_Quantities_Table_Monthly[0], Portal_Phone_Model_With_Alias)
+    if Final_Scaled_Quantities_Table_Monthly.count() <> 0:
+      logger.info("done")
+      Final_Scaled_Quantities_Table_Monthly.write.saveAsTable(Scaled_Quantities_Table_Monthly_Cleaned[0],format='parquet',mode = 'overwrite')
+    if Final_Scaled_Quantities_Table_Monthly.count() == 0:
+      logger.info("failed")
+  if Report_Type == 'Weekly':
+    Final_Scaled_Quantities_Table_Weekly = HRG_Final_Quantity_Table_Cleanup_Weekly(Scaled_Quantities_Table_Weekly[0], Portal_Phone_Model_With_Alias)
+    if Final_Scaled_Quantities_Table_Weekly.count() <> 0:
+      logger.info("done")
+      Final_Scaled_Quantities_Table_Weekly.write.saveAsTable(Scaled_Quantities_Table_Weekly_Cleaned[0],format='parquet',mode = 'overwrite')
+    if Final_Scaled_Quantities_Table_Weekly.count() == 0:
+      logger.info("failed")
+      
+  #   Aggregate the quantities at monthly/weekly level and attach the details required for generting the output
+  logger.info("\nHRG Output: Aggregating the quantities...")
+  if Report_Type == 'Monthly':
+    Function_Status = HRG_Monthly_Output_Aggregator(Scaled_Quantities_Table_Monthly_Cleaned[0], Portal_P1_Parameter, Portal_P2_Parameter, Portal_PhonePrice, Portal_Phone_Model_With_Alias,StoreCost_Lookup_Monthly[0],RetailPrice_Lookup_Monthly[0], Activation_Lookup_Monthly[0],DeviceSpecification_Lookup_Monthly[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+  if Report_Type == 'Weekly':
+    Function_Status = HRG_Weekly_Output_Aggregator(Scaled_Quantities_Table_Weekly_Cleaned[0], Portal_P1_Parameter, Portal_P2_Parameter, Portal_PhonePrice, Portal_Phone_Model_With_Alias)
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+  
+    
+#   Call the function
+# Output()
+  
+# logger.info("\nHRG Output: All operations complete.")
+---------------------------------------------------------------------------------------------------------------------------------------
