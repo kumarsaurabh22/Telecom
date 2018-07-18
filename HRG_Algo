@@ -1,0 +1,258 @@
+#  Purpose     :   To run the MM3 algorigthms 
+#  Input(s)    :   Aggregator tables and Portal tables
+#  Ouput(s)    :   Algo outputs
+#  Developer   :   Aritra Banerjee (Aritra.Banerjee@mscience.com)
+#  Date        :   05/08/2018
+#  Description :   Running the MM3 algorithms for MHR/WHR
+---------------------------------------------------------------------------------------------------------------------------------------
+import pyspark.sql.functions as F
+import pyspark.sql.types as T
+import pyspark.sql.window as W
+  
+# Defining variables - update table name here if needed
+HRG_algo_config_table = 'group_mr.HRG_Algo_Config_Table'
+HRG_MM3_Input_table = 'group_mr.HRG_MM3_Input_Table'
+# Report_Type = 'Monthly'
+# # Algo_Type = 'MM3'
+# Rebuild_Dashboard_Tables = 1
+# Week_Start = '2018-05-20'
+# Month_Start = '2018-04-01'
+# Week_End = '2018-05-05'
+# Month_End = '2018-05-05'
+# Run_MM1 = '0'
+# Run_Apple = '0'
+# Run_MM3 = '1'
+
+# Refresh input tables and load functions
+---------------------------------------------------------------------------------------------------------------------------------------
+%sql
+
+refresh table group_mr.HRG_Algo_Config_Table;
+
+refresh table group_mr.HRG_MM3_Input_Table;
+
+-- uploading config file & parameter list in a separate notebook, check if read.csv can be used, csv will be in S3
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Algo/HRG_Monthly_Create_Dashboard_Table"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Algo/HRG_Weekly_Create_Dashboard_Table"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Weekly/Ganges Only/HRG_Weekly_MM3_V2"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Weekly/Ganges Only/HRG_Weekly_MM1_ActiveStores"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Weekly/Ganges Only/HRG_Weekly_MM1_Growthrates_V3"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Weekly/Ganges Only/HRG_Weekly_MM1_Apple_UsingNonapple"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Weekly/Ganges Only/HRG_Weekly_Apple_RawQuantities"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Weekly/Ganges Only/HRG_Weekly_Apple_StoreCount"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Monthly/Ganges Only/HRG_Monthly_MM3"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Monthly/Ganges Only/HRG_Monthly_MM1_ActiveStores"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Monthly/Ganges Only/HRG_Monthly_MM1_Growthrates"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Monthly/Ganges Only/HRG_Monthly_MM1_Apple_UsingNonapple"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Monthly/Ganges Only/HRG_Monthly_Apple_RawQuantities"
+---------------------------------------------------------------------------------------------------------------------------------------
+%run "GROUPS/mr/Telecom/Telecom_Migration/T_Algo/Monthly/Ganges Only/HRG_Monthly_Apple_StoreCount"
+---------------------------------------------------------------------------------------------------------------------------------------
+
+def Algo(Report_Type, Rebuild_Dashboard_Tables, Run_MM1, Run_Apple, Run_MM3, Week_Start, Week_End, Month_Start, Month_End):
+ 
+  logger.info('HRG Algo Module Welcomes You.')
+  
+  # Read config table
+  logger.info('\nHRG Algo: Reading config table...')
+  config_table = spark.table(HRG_algo_config_table)
+  logger.info("done")
+  
+  logger.info('\nHRG Algo: Fetching the required values...')
+  # Get values 
+  Dashboard_Table_Monthly = config_table.where("Field = 'Dashboard Table Monthly' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Dashboard_Table_Weekly = config_table.where("Field = 'Dashboard Table Weekly' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Dashboard_Raw_Table_Monthly = config_table.where("Field = 'Dashboard Raw Table Monthly' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Dashboard_Raw_Table_Weekly = config_table.where("Field = 'Dashboard Raw Table Weekly' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Quantities_By_Band_Table = config_table.where("Field = 'Quantities By Band Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Sellthrough_Output_Table = config_table.where("Field = 'Sellthrough Output Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Inventory_Output_Table = config_table.where("Field = 'Inventory Output Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Dashboard_Table_Monthly_Columns = config_table.where("Field = 'Dashboard Table Monthly' and Type = 'Column Name'").select('Field_Detail').collect()[0]
+  Dashboard_Table_Weekly_Columns = config_table.where("Field = 'Dashboard Table Weekly' and Type = 'Column Name'").select('Field_Detail').collect()[0]
+  Dashboard_Raw_Table_Monthly_Columns = config_table.where("Field = 'Dashboard Raw Table Monthly' and Type = 'Column Name'").select('Field_Detail').collect()[0]
+  Dashboard_Raw_Table_Weekly_Columns = config_table.where("Field = 'Dashboard Raw Table Weekly' and Type = 'Column Name'").select('Field_Detail').collect()[0]
+  
+  Monthly_MM1_Output_MoM = config_table.where("Field = 'Monthly MM1 Output MoM' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Monthly_MM1_Output_QoQ = config_table.where("Field = 'Monthly MM1 Output QoQ' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Monthly_MM1_Output_YoY = config_table.where("Field = 'Monthly MM1 Output YoY' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Monthly_MM1_GrowthRates_Output = config_table.where("Field = 'Monthly MM1 Growth Rates Output' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Monthly_MM1_Apple_Count_Table = config_table.where("Field = 'Monthly MM1 Apple Non Apple Count Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  
+  Weekly_MM1_Output_WoW = config_table.where("Field = 'Weekly MM1 Output WoW' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Weekly_MM1_Output_QoQ = config_table.where("Field = 'Weekly MM1 Output QoQ' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Weekly_MM1_Output_YoY = config_table.where("Field = 'Weekly MM1 Output YoY' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Weekly_MM1_GrowthRates_Output = config_table.where("Field = 'Weekly MM1 Growth Rates Output' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Weekly_MM1_Apple_Count_Table = config_table.where("Field = 'Weekly MM1 Apple Non Apple Count Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  
+  Monthly_Apple_Raw_Quantities = config_table.where("Field = 'Apple Monthly Raw Quantities Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Monthly_Apple_Store_Count = config_table.where("Field = 'Apple Monthly Store Count Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Weekly_Apple_Raw_Quantities = config_table.where("Field = 'Apple Weekly Raw Quantities Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  Weekly_Apple_Store_Count = config_table.where("Field = 'Apple Weekly Store Count Table' and Type = 'Table Name'").select('Field_Detail').collect()[0]
+  
+#   name functions & variables & table & notebooks as HRG_Monthly... and HRG_Weekly...
+  
+  logger.info('\nHRG Algo: Executing based on config table...')
+  
+  ############# Rebuild the dashboards tables if the user requested ###########
+  #   Monthly
+  if Rebuild_Dashboard_Tables == '1' and Report_Type == 'Monthly':
+    logger.info("\nHRG Algo: Rebuilding monthly raw and output dashboard table with no data...")
+    Function_Status = HRG_Monthly_Create_Dashboard_Table(Dashboard_Table_Monthly[0], Dashboard_Table_Monthly_Columns[0], Dashboard_Raw_Table_Monthly[0], Dashboard_Raw_Table_Monthly_Columns[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+  
+  #   Weekly
+  if Rebuild_Dashboard_Tables == '1' and Report_Type == 'Weekly':
+    logger.info("\nHRG Algo: Creating weekly raw and output dashboard table...")
+    Function_Status = HRG_Weekly_Create_Dashboard_Table(Dashboard_Table_Weekly[0], Dashboard_Table_Weekly_Columns[0],Dashboard_Raw_Table_Weekly[0], Dashboard_Raw_Table_Weekly_Columns[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+   #################################################################################
+  
+    # Running MM1 for Monthly
+  if Run_MM1 == '1' and Report_Type == 'Monthly':
+    logger.info("\nHRG Algo: Running MM1 Active Stores...")
+    Function_Status = HRG_monthly_ActiveStores(Sellthrough_Output_Table[0],Month_Start,Monthly_MM1_Output_MoM[0],Monthly_MM1_Output_QoQ[0],Monthly_MM1_Output_YoY[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+    logger.info("\nHRG Algo: Running MM1 Growth Rates...")
+    Function_Status = HRG_monthly_GrowthRates(Sellthrough_Output_Table[0],Month_Start,Monthly_MM1_Output_MoM[0],Monthly_MM1_Output_QoQ[0],Monthly_MM1_Output_YoY[0],Monthly_MM1_GrowthRates_Output[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+    logger.info("\nHRG Algo: Running MM1 Apple Using Non-Apple...")
+    Function_Status = HRG_monthly_MM1_GetRawApple(Sellthrough_Output_Table[0],Month_Start,Monthly_MM1_Apple_Count_Table[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+      
+      # Running MM1 for Weekly
+  if Run_MM1 == '1' and Report_Type == 'Weekly':
+    logger.info("\nHRG Algo: Running MM1 Active Stores...")
+    Function_Status = HRG_Weekly_ActiveStores(Sellthrough_Output_Table[0],Week_Start,Weekly_MM1_Output_WoW[0],Weekly_MM1_Output_QoQ[0],Weekly_MM1_Output_YoY[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+    logger.info("\nHRG Algo: Running MM1 Growth Rates...")
+    Function_Status = HRG_Weekly_GrowthRates(Sellthrough_Output_Table[0],Weekly_MM1_Output_WoW[0],Weekly_MM1_Output_QoQ[0],Weekly_MM1_Output_YoY[0],Week_Start,Weekly_MM1_GrowthRates_Output[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+    logger.info("\nHRG Algo: Running MM1 Apple Using Non-Apple...")
+    Function_Status = HRG_Weekly_MM1_GetRawApple(Sellthrough_Output_Table[0],Week_Start,Weekly_MM1_Apple_Count_Table[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+      
+      
+        # Running Apple Model for Monthly
+  if Run_Apple == '1' and Report_Type == 'Monthly':
+    logger.info("\nHRG Algo: Running Apple Raw Quantities...")
+    Function_Status = HRG_Monthly_Apple_Raw(Sellthrough_Output_Table[0],Month_Start,Monthly_Apple_Raw_Quantities[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+    logger.info("\nHRG Algo: Running Apple Store Count...")
+    Function_Status = HRG_Monthly_Apple_StoreCount(Sellthrough_Output_Table[0],Month_Start,Monthly_Apple_Store_Count[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+      
+      
+       # Running Apple Model for Weekly
+  if Run_Apple == '1' and Report_Type == 'Weekly':
+    logger.info("\nHRG Algo: Running Apple Raw Quantities...")
+    Function_Status = HRG_Weekly_Apple_Raw(Sellthrough_Output_Table[0],Week_Start,Weekly_Apple_Raw_Quantities[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+    logger.info("\nHRG Algo: Running Apple Store Count...")
+    Function_Status = HRG_Weekly_Apple_StoreCount(Sellthrough_Output_Table[0],Week_Start,Weekly_Apple_Store_Count[0])
+    if Function_Status == True:
+      logger.info("done")
+    if Function_Status == False:
+      logger.info("failed")
+      
+  
+  # Read the MM3 input table
+  logger.info('\nHRG Algo: Reading MM3 input table...')
+  input_table = spark.table(HRG_MM3_Input_table)
+  logger.info("done")
+  
+#   Select only relevant columns
+  switch_enabled_input_table = input_table.where('EnableSwitch = 1').select('Operator', 'Manufacturer', 'Model', 'DeviceType', 'Band', 'SellingPeak', 'StraightModelWeight')
+  
+  
+#   Call the function to run MM3 for all the live models for weekly
+  if Run_MM3 == '1' and Report_Type == 'Weekly':
+    logger.info("\nHRG Algo: Running MM3 Weekly...")
+    Function_Status = HRG_Weekly_MM3(Sellthrough_Output_Table[0], Inventory_Output_Table[0], Quantities_By_Band_Table[0],switch_enabled_input_table, Week_End, Dashboard_Raw_Table_Weekly[0], Dashboard_Table_Weekly[0])
+    if Function_Status == True:
+      logger.info("done")
+      logger.info("MM3 has failed for the following models")
+      Dashboard_Table = spark.table(Dashboard_Table_Weekly[0])
+      Models_Ran_df = Dashboard_Table.select(F.col('Operator'),F.col('Manufacturer'),F.col('Model'),F.lit(1).alias('Flag')).distinct()
+      Models_Failed_df = (switch_enabled_input_table.alias('a').join(Models_Ran_df.alias('b'),[F.col('a.Operator')==F.col('b.Operator'),
+                                                                                             F.col('a.Manufacturer')==F.col('b.Manufacturer'),
+                                                                                             F.col('a.Model')==F.col('b.Model')],'left').select(F.col('a.operator'),F.col('a.Manufacturer'),F.col('a.Model'),F.col('b.Flag')) ).alias('c').where("c.Flag IS NULL").select(F.col('c.Operator'),F.col('c.Manufacturer'),F.col('c.Model')).distinct().show(500,False)
+    if Function_Status == False:
+      logger.info("failed")
+      
+      
+      #   Call the function to run MM3 for all the live models for monthly
+  if Run_MM3 == '1' and Report_Type == 'Monthly':
+    logger.info("\nHRG Algo: Running MM3 Monthly...")
+    Function_Status = HRG_Monthly_MM3(Sellthrough_Output_Table[0], Inventory_Output_Table[0], Quantities_By_Band_Table[0],switch_enabled_input_table, Month_End, Dashboard_Raw_Table_Monthly[0], Dashboard_Table_Monthly[0])
+    if Function_Status == True:
+      logger.info("done")
+      logger.info("MM3 has failed for the following models")
+      Dashboard_Table = spark.table(Dashboard_Table_Monthly[0])
+      Models_Ran_df = Dashboard_Table.select(F.col('Operator'),F.col('Manufacturer'),F.col('Model'),F.lit(1).alias('Flag')).distinct()
+      Models_Failed_df = (switch_enabled_input_table.alias('a')\
+                          .join(Models_Ran_df.alias('b'),
+                                [
+                                  F.col('a.Operator')==F.col('b.Operator'),
+                                  F.col('a.Manufacturer')==F.col('b.Manufacturer'),
+                                  F.col('a.Model')==F.col('b.Model')
+                                ],'left')\
+                          .select(F.col('a.operator'),
+                                  F.col('a.Manufacturer'),
+                                  F.col('a.Model'),
+                                  F.col('b.Flag')) ).alias('c').where("c.Flag IS NULL").select(F.col('c.Operator'),F.col('c.Manufacturer'),F.col('c.Model')).distinct().show(500,False)
+    if Function_Status == False:
+      logger.info("failed")
+     
+
+    
+#   Call the function
+# Algo(Report_Type, Rebuild_Dashboard_Tables, Run_MM1, Run_Apple, Run_MM3, Week_Start, Week_End, Month_Start, Month_End)
+  
+# logger.info("\nHRG Algo: All operations complete.")
+---------------------------------------------------------------------------------------------------------------------------------------
