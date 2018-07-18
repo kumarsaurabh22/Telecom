@@ -1,0 +1,447 @@
+# Purpose : To build Color and Storage Report by splitting the Quantity from MHR based on the color and storage variants of a particular model 
+
+# Description : To build Color and Storage report - by splitting MHR Quantity based on the ratio of raw quantity per model and by color and storage variants
+
+# Input : 5 tables [ganges.device_modeling_table ,group_mr.HRG_Monthly_Activation_Lookup , group_mr.HRG_Monthly_StoreCost_Lookup, group_mr.HRG_Monthly_RetailPrice_Lookup , group_mr.output_into_excel_main ]
+
+# Output : 1 table [group_mr.color_storage_output]
+
+# Developer : Achyut Anand
+# Date : 2018-05-18
+---------------------------------------------------------------------------------------------------------------------------------------
+# Start Logging
+import datetime as D
+today = D.datetime.today()
+
+import logging
+logger = logging.getLogger(__name__)
+LogFile = "oct_log_" + str(today) + ".log";
+
+# Get a file handler (to print to a log file) and a stream handler (to print to the screen)
+file_handler = logging.FileHandler(LogFile)
+stream_handler = logging.StreamHandler()
+
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
+
+# Format
+formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(module)s: %(message)s')
+file_handler.setFormatter(formatter)
+stream_handler.setFormatter(formatter)
+
+# Set log level - INFO fine for now
+logger.setLevel(logging.INFO)
+---------------------------------------------------------------------------------------------------------------------------------------
+%run /GROUPS/mr/Telecom/Telecom_Migration/Reusable_Functions
+---------------------------------------------------------------------------------------------------------------------------------------
+from pyspark.sql.types import DoubleType, IntegerType, StringType, DateType, StructType, StructField
+from pyspark.sql import *
+import pyspark.sql.functions as F
+import pyspark.sql.window as W
+---------------------------------------------------------------------------------------------------------------------------------------
+# Portal_DevicePrices schema
+
+# Converting the portal table from Pandas DF to PySpark DF
+Portal_DevicePrices_schema = StructType([StructField("OperatorID",IntegerType(), True)\
+                     ,StructField("ManufacturerID",IntegerType(), True)\
+                     ,StructField("AliasID",IntegerType(), True)\
+                     ,StructField("MemoryID",IntegerType(), True)\
+                     ,StructField("OperatorName",StringType(), True)\
+                     ,StructField("ManufacturerName",StringType(), True)\
+                     ,StructField("AliasName",StringType(), True)\
+                     ,StructField("MemorySpecification",StringType(), True)\
+                     ,StructField("ModelMemory_GB",StringType(), True)\
+                     ,StructField("PlanType",StringType(), True)\
+                     ,StructField("RecordDate",StringType(), True)\
+                     ,StructField("StartDate",StringType(), True)\
+                     ,StructField("EndDate",StringType(), True)\
+                     ,StructField("PriceType",StringType(), True)\
+                     ,StructField("Amount",DoubleType(), True)\
+                     ,StructField("Source",StringType(), True)\
+                     ,StructField("Comments",StringType(), True)
+                     ])
+---------------------------------------------------------------------------------------------------------------------------------------
+# Portal P1 parameter schema
+
+# Converting the portal table from Pandas DF to PySpark DF
+P1_params_schema1 = StructType([StructField("ModelID",IntegerType(), True)\
+                     ,StructField("Manufacturer_id",IntegerType(), True)\
+                     ,StructField("Model_Name",StringType(), True)\
+                     ,StructField("Manufacturer_Name",StringType(), True)\
+                     ,StructField("Device_Type",StringType(), True)\
+                     ,StructField("OS",StringType(), True)\
+                     ,StructField("Display_Size",StringType(), True)\
+                     ,StructField("Battery",StringType(), True)\
+                     ,StructField("Processor",StringType(), True)\
+                     ,StructField("ProcessorSpeed",StringType(), True)\
+                     ,StructField("Processor_Cores",StringType(), True)\
+                     ,StructField("ChipManufacturer",StringType(), True)\
+                     ,StructField("ChipModel",StringType(), True)\
+                     ])
+---------------------------------------------------------------------------------------------------------------------------------------
+# Portal P2 parameter schema
+
+# Converting the portal table from Pandas DF to PySpark DF
+P2_params_schema2 = StructType([StructField("OperatorID",IntegerType(), True)\
+                     ,StructField("ManufacturerID",IntegerType(), True)\
+                     ,StructField("AliasID",IntegerType(), True)\
+                     ,StructField("OperatorName",StringType(), True)\
+                     ,StructField("ManufacturerName",StringType(), True)\
+                     ,StructField("AliasName",StringType(), True)\
+                     ,StructField("RadioCDMA",StringType(), True)\
+                     ,StructField("RadioGSM",StringType(), True)\
+                     ,StructField("RadioLTE",StringType(), True)\
+                     ,StructField("RadioUMTS",StringType(), True)\
+                     ,StructField("DataCDMA",StringType(), True)\
+                     ,StructField("DataGSM",StringType(), True)\
+                     ,StructField("DataHSDPA",StringType(), True)\
+                     ,StructField("DataHSUPA",StringType(), True)\
+                     ,StructField("DataUMTS",StringType(), True)\
+                     ,StructField("DataGlobalRoaming",StringType(), True)\
+                     ,StructField("Data4G",StringType(), True)\
+                     ,StructField("Operator-Mfg-AliasName",StringType(), True)\
+                     ,StructField("Checking",StringType(), True)\
+                     ])
+---------------------------------------------------------------------------------------------------------------------------------------
+# Declare variables
+
+# Input table
+source_table = 'ganges.device_modeling_table'
+
+# Lookup Table
+HRG_Monthly_Activation_Lookup = 'group_mr.HRG_Monthly_Activation_Lookup'
+HRG_Monthly_StoreCost_Lookup = 'group_mr.HRG_Monthly_StoreCost_Lookup'
+HRG_Monthly_RetailPrice_Lookup = 'group_mr.HRG_Monthly_RetailPrice_Lookup'
+output_into_excel_main = 'group_mr.output_into_excel_main'
+# this table to be replaced by the output table of MHR 
+
+# Portal tables 
+Portal_DevicePrices = 'Portal_DevicePrices.csv'
+Portal_DeviceP1Parameters = 'Portal_DeviceP1Parameters.csv'
+Portal_DeviceP2Parameters = 'Portal_DeviceP2Parameters.csv'
+
+# Output table
+color_storage_output = 'group_mr.color_storage_output'
+---------------------------------------------------------------------------------------------------------------------------------------
+# Creating dataframe
+
+source_table_df = spark.table(source_table)
+HRG_Monthly_Activation_Lookup_df = spark.table(HRG_Monthly_Activation_Lookup)
+HRG_Monthly_StoreCost_Lookup_df = spark.table(HRG_Monthly_StoreCost_Lookup)
+HRG_Monthly_RetailPrice_Lookup_df = spark.table(HRG_Monthly_RetailPrice_Lookup)
+output_into_excel_main = spark.table(output_into_excel_main)
+
+Portal_DevicePrices = HRG_Load_Portal_Tables(Portal_DevicePrices)
+# Portal_DevicePrices
+Portal_DevicePrices_df = sqlContext.createDataFrame(Portal_DevicePrices, Portal_DevicePrices_schema)
+
+Portal_DevicePrices_df = Portal_DevicePrices_df\
+.withColumn('MemorySpecification',F.when((F.col('MemorySpecification')=='NaN'),'null').otherwise(F.col('MemorySpecification')))\
+.withColumn('ModelMemory_GB',F.when((F.col('ModelMemory_GB')=='NaN'),'null').otherwise(F.col('ModelMemory_GB')))\
+.withColumn('Source',F.when((F.col('Source')=='NaN'),'null').otherwise(F.col('Source')))\
+.withColumn('Comments',F.when((F.col('Comments')=='NaN'),'null').otherwise(F.col('Comments')))
+
+# Portal P1 parameters
+portal_P1_parameters =  HRG_Load_Portal_Tables(Portal_DeviceP1Parameters)
+Portal_P1_Parameters_df = sqlContext.createDataFrame(portal_P1_parameters, P1_params_schema1)
+Portal_P1_Parameters_df = Portal_P1_Parameters_df\
+.withColumn('OS',F.when((F.col('OS')=='NaN'),'null').otherwise(F.col('OS')))\
+.withColumn('Display_Size',F.when((F.col('Display_Size')=='NaN'),'null').otherwise(F.col('Display_Size')))\
+.withColumn('Processor',F.when((F.col('Processor')=='NaN'),'null').otherwise(F.col('Processor')))\
+.withColumn('Battery',F.when((F.col('Battery')=='NaN'),'null').otherwise(F.col('Battery')))\
+.withColumn('ProcessorSpeed',F.when((F.col('ProcessorSpeed')=='NaN'),'null').otherwise(F.col('ProcessorSpeed')))\
+.withColumn('Processor_Cores',F.when((F.col('Processor_Cores')=='NaN'),'null').otherwise(F.col('Processor_Cores')))\
+.withColumn('ChipManufacturer',F.when((F.col('ChipManufacturer')=='NaN'),'null').otherwise(F.col('ChipManufacturer')))\
+.withColumn('ChipModel',F.when((F.col('ChipModel')=='NaN'),'null').otherwise(F.col('ChipModel')))
+
+# Portal P2 parameters
+portal_P2_parameters =  HRG_Load_Portal_Tables(Portal_DeviceP2Parameters)
+Portal_P2_Parameters_df = sqlContext.createDataFrame(portal_P2_parameters, P2_params_schema2)
+Portal_P2_Parameters_df = Portal_P2_Parameters_df\
+.withColumn('RadioCDMA',F.when((F.col('RadioCDMA')=='NaN'),'null').otherwise(F.col('RadioCDMA')))\
+.withColumn('RadioGSM',F.when((F.col('RadioGSM')=='NaN'),'null').otherwise(F.col('RadioGSM')))\
+.withColumn('RadioLTE',F.when((F.col('RadioLTE')=='NaN'),'null').otherwise(F.col('RadioLTE')))\
+.withColumn('RadioUMTS',F.when((F.col('RadioUMTS')=='NaN'),'null').otherwise(F.col('RadioUMTS')))\
+.withColumn('DataCDMA',F.when((F.col('DataCDMA')=='NaN'),'null').otherwise(F.col('DataCDMA')))\
+.withColumn('DataGSM',F.when((F.col('DataGSM')=='NaN'),'null').otherwise(F.col('DataGSM')))\
+.withColumn('DataHSDPA',F.when((F.col('DataHSDPA')=='NaN'),'null').otherwise(F.col('DataHSDPA')))\
+.withColumn('DataHSUPA',F.when((F.col('DataHSUPA')=='NaN'),'null').otherwise(F.col('DataHSUPA')))\
+.withColumn('DataUMTS',F.when((F.col('DataUMTS')=='NaN'),'null').otherwise(F.col('DataUMTS')))\
+.withColumn('DataGlobalRoaming',F.when((F.col('DataGlobalRoaming')=='NaN'),'null').otherwise(F.col('DataGlobalRoaming')))\
+.withColumn('Data4G',F.when((F.col('Data4G')=='NaN'),'null').otherwise(F.col('Data4G')))
+---------------------------------------------------------------------------------------------------------------------------------------
+def Color_and_Storage_Function(source_table_df ,HRG_Monthly_Activation_Lookup_df,HRG_Monthly_StoreCost_Lookup_df, HRG_Monthly_RetailPrice_Lookup_df, output_into_excel_main,Portal_DevicePrices_df,Portal_P1_Parameters_df,Portal_P2_Parameters_df ):
+
+  
+# The condition dataset = 'g' to be removed after thames testing is done
+
+  source_table_df = source_table_df.where("dataset = 'g'")
+
+# Creating a dataframe where Store cost, retail price and Activations as % of Total sales is getting attached
+
+  Output_Into_Excel_Main_With_Storage = source_table_df.alias('a')\
+  .join(HRG_Monthly_Activation_Lookup_df.alias('b'),
+      [
+        F.year('a.Datecreated')== F.year('b.month_year'),
+        F.month('a.Datecreated') == F.month('b.month_year'),
+        F.col('a.operator') == F.col('b.operator'),
+        F.col('a.manufacturer_final') == F.col('b.manufacturer'),
+        F.col('a.model_final') == F.col('b.model')
+      ],
+      'left').join(HRG_Monthly_StoreCost_Lookup_df.alias('c'),
+                  [
+                     F.year('a.Datecreated')== F.year('c.month_year'),
+                     F.month('a.Datecreated') == F.month('c.month_year'),
+                     F.col('a.operator') == F.col('c.operator'),
+                     F.col('a.manufacturer_final') == F.col('c.manufacturer'),
+                     F.col('a.model_final') == F.col('c.model')
+                  ],'left').join(HRG_Monthly_RetailPrice_Lookup_df.alias('d'),
+                          [
+                            F.year('a.Datecreated')== F.year('d.month_year'),
+                            F.month('a.Datecreated') == F.month('d.month_year'),
+                            F.col('a.operator') == F.col('d.operator'),
+                            F.col('a.manufacturer_final') == F.col('d.manufacturer'),
+                            F.col('a.model_final') == F.col('d.model')
+                          ],
+                          'left')\
+  .where("a.store_device = 1")\
+  .where("transactionType = 'Sale'")\
+  .where("device_type in ('Smartphone', 'Feature Phone')")\
+  .where("a.DateCreated >= '2013-01-01'")\
+  .where("a.operator in ('AT&T','T-Mobile','Sprint','Verizon','Boost','MetroPCS','Cricket','Telus','Rogers Wireless','Bell Mobility','US Cellular','Virgin Mobile U.S.','Freedom Mobile')")\
+  .select(F.year('a.Datecreated').alias('year'),\
+          F.quarter('a.Datecreated').alias('quarter'),\
+          F.month('a.Datecreated').alias('month'),\
+          date_trunc(F.col('a.Datecreated'),'month').alias('Date'),\
+          F.col('a.operator').alias('operator'),\
+          F.col('a.manufacturer_final').alias('manufacturer'),\
+          F.col('a.model_final').alias('model'),\
+          F.col('a.device_capacity'),\
+          F.col('a.color'),\
+          F.col('b.act_as_total_sales').alias('Activations_as_%_of_TotalSales'),\
+          F.col('c.wt_unitcost').alias('Avg_Store_Cost'),\
+          F.col('d.wt_unitprice').alias('Avg_retail_Price'),\
+          F.col('a.Device_Type')).distinct()
+
+
+# updating color and device capacity column
+  Output_Into_Excel_Main_With_Storage = Output_Into_Excel_Main_With_Storage\
+  .withColumn('device_capacity',
+              F.when(
+                F.col('device_capacity').isNull()
+                ,'NA')
+              .otherwise(F.col('device_capacity')))\
+  .withColumn('color',
+              F.when(
+                F.col('color').isNull()
+                ,'NA')
+              .otherwise(F.col('color')))
+
+# getting Phone prices from the portal table
+  tempPhonePrices_df = Portal_DevicePrices_df\
+  .where("RecordDate is not null")\
+  .where("PriceType in ('EIP','Full Cash Price')")\
+  .where("amount is not null")
+
+# Aggregating to get the Avg Full cash price and Avg EIP
+  
+  Portal_DevicePrices_Grouped_df = tempPhonePrices_df\
+  .groupBy('OperatorName','ManufacturerName','AliasName','ModelMemory_GB',
+           'PlanType',F.year('StartDate').alias('Year') , F.month('StartDate').alias('Month'))\
+  .agg(F.avg(
+    F.when(
+      (F.col('PriceType').isin('Full Cash Price')== True)
+      ,F.col('Amount'))).alias('AvgFullCashPrice'),\
+       F.avg(
+         F.when(
+           (F.col('PriceType').isin('EIP')== True)
+           ,F.col('Amount'))).alias('AvgEIP'))
+
+# Update Prices
+# Step 1: Get all the models with multiple plan types
+
+  temp1_df = Portal_DevicePrices_Grouped_df\
+  .groupBy('Year','Month','OperatorName','ManufacturerName','AliasName','ModelMemory_GB')\
+  .agg(F.count('PlanType').alias('Number_of_PlanTypes'))\
+  .where(F.count('PlanType')>1)
+
+# Step 2: Remove all the plan type = pre for the models which have both post and pre prices
+
+# deleting all the prices for prepaid plan type, retain the postpaid prices 
+
+  temp2_df = Portal_DevicePrices_Grouped_df.alias('a')\
+  .join(temp1_df.alias('b'),
+      [
+        F.col('a.Year') == F.col('b.Year'),
+        F.col('a.Month') == F.col('b.Month'),
+        F.col('a.OperatorName')== F.col('b.OperatorName'),
+        F.col('a.ManufacturerName') == F.col('b.ManufacturerName'),
+        F.col('a.AliasName') == F.col('b.AliasName'),
+        F.col('a.ModelMemory_GB') == F.col('b.ModelMemory_GB'),
+        F.col('a.PlanType') == 'Post'
+      ],
+      'inner').select('a.*')
+
+# Updating Null values with NA
+
+  Price_by_Model_and_Memory_df = temp2_df\
+  .withColumn('ModelMemory_GB',F.when((F.col('a.ModelMemory_GB').isin('NaN','null')==True),'NA').otherwise(F.col('ModelMemory_GB')))
+
+# Quantity based on Operator, Manufacturer and Model
+
+  tempQuantities_by_Model_df = source_table_df.alias('a')\
+  .where("a.store_device = 1")\
+  .where("a.transactionType = 'Sale'")\
+  .where("a.device_type in ('Smartphone', 'Feature Phone')")\
+  .where("a.DateCreated >= '2013-01-01'")\
+  .where("a.operator in ('AT&T','T-Mobile','Sprint','Verizon','Boost','MetroPCS','Cricket','Telus','Rogers Wireless','Bell Mobility','US Cellular','Virgin Mobile U.S.','Freedom Mobile')")\
+  .groupBy(F.year('a.Datecreated').alias('Year'),F.month('a.DateCreated').alias('Month'),'operator', F.col('manufacturer_final').alias('manufacturer'),F.col('model_final').alias('model'))\
+  .agg(F.sum('Quantity').alias('Quantity'))
+
+# Quantity based on color and storage
+
+  tempQuantities_by_Model_withColorAndStorage_df = source_table_df.alias('a')\
+  .where("a.store_device = 1")\
+  .where("a.transactionType = 'Sale'")\
+  .where("a.device_type in ('Smartphone', 'Feature Phone')")\
+  .where("a.DateCreated >= '2013-01-01'")\
+  .where("a.operator in ('AT&T','T-Mobile','Sprint','Verizon','Boost','MetroPCS','Cricket','Telus','Rogers Wireless','Bell Mobility','US Cellular','Virgin Mobile U.S.','Freedom Mobile')")\
+  .groupBy(F.year('a.Datecreated').alias('Year'),F.month('a.DateCreated').alias('Month'),'operator', F.col('manufacturer_final').alias('manufacturer'),F.col('model_final').alias('model'),'device_capacity','color')\
+  .agg(F.sum('Quantity').alias('Quantity'))
+
+
+# Creating a multiplier metrics based on Operator Manufacturer Model and Color and Storage quantities
+
+  tempQuantities_With_Multiplier_df = tempQuantities_by_Model_withColorAndStorage_df.alias('a').join(tempQuantities_by_Model_df.alias('b'),
+      [
+        F.col('a.Year')== F.col('b.Year'),
+        F.col('a.Month') == F.col('b.Month'),
+        F.col('a.Operator') == F.col('b.Operator'),
+        F.col('a.manufacturer') == F.col('b.manufacturer'),
+        F.col('a.model') == F.col('b.model')
+      ],
+      'inner').select('a.Year'\
+                      ,'a.Month'\
+                      ,'a.operator'\
+                      ,'a.manufacturer'\
+                      ,'a.model'\
+                      ,'a.device_capacity'\
+                      ,'a.color',\
+                     (F.col('a.Quantity')/F.col('b.Quantity')).alias('Multiplier'))
+
+# Updating dataframe for device capacity and color columns
+
+  tempQuantities_With_Multiplier_df = tempQuantities_With_Multiplier_df.withColumn('device_capacity',
+                                                                                   F.when(
+                                                                                    F.col('device_capacity').isNull()
+                                                                                         ,'NA')
+                                                                                   .otherwise(F.col('device_capacity')))\
+  .withColumn('color',
+            F.when(
+              F.col('color').isNull()
+              ,'NA')
+            .otherwise(F.col('color')))
+
+
+# Calculating more metrics like GMV Avg Store Cost, GMV Avg Retail Price, GMV Full Cash Price and GMV EIP
+
+  Output_Into_Excel_Main_With_Prices_df = Output_Into_Excel_Main_With_Storage.alias('a')\
+.join(output_into_excel_main.alias('b'),
+      [
+        F.col('a.Year')== F.col('b.Year'),
+        F.col('a.Month') == F.col('b.Month'),
+        F.col('a.operator') == F.col('b.operator'),
+        F.col('a.manufacturer') == F.col('b.manufacturer'),
+        F.col('a.model') == F.col('b.model')
+      ],
+      'left').join(tempQuantities_With_Multiplier_df.alias('c'),
+                  [
+                     F.col('a.Year')== F.col('c.Year'),
+                     F.col('a.Month') == F.col('c.Month'),
+                     F.col('a.operator') == F.col('c.operator'),
+                     F.col('a.manufacturer') == F.col('c.manufacturer'),
+                     F.col('a.model') == F.col('c.model'),
+                     F.col('a.device_capacity') == F.col('c.device_capacity'),
+                     F.col('a.color') == F.col('c.color')
+                  ],'left').join(Price_by_Model_and_Memory_df.alias('d'),
+                          [
+                            F.col('a.Year')== F.col('d.Year'),
+                            F.col('a.Month') == F.col('d.Month'),
+                            F.col('a.operator') == F.col('d.OperatorName'),
+                            F.col('a.manufacturer') == F.col('d.ManufacturerName'),
+                            F.col('a.model') == F.col('d.AliasName'),
+                            F.col('a.device_capacity') == F.col('d.ModelMemory_GB')
+                          ],
+                          'left').select(F.col('a.year').alias('year'),\
+                                         F.col('a.quarter').alias('quarter'),\
+                                         F.col('a.month').alias('month'),\
+                                         F.col('a.Date'),\
+                                         F.col('a.operator').alias('operator'),\
+                                         F.col('a.manufacturer').alias('manufacturer'),\
+                                         F.col('a.model').alias('model'),\
+                                         F.col('a.device_capacity'),\
+                                         F.col('a.color'),\
+                                         (F.col('b.Quantity')* F.col('c.Multiplier')).alias('Quantity'),\
+                                         F.col('a.Avg_Store_Cost'),\
+                                         ((F.col('b.Quantity')* F.col('c.Multiplier'))*F.col('a.Avg_Store_Cost')).alias('GMV_Store_Cost'),\
+                                         F.col('a.Avg_retail_Price'),\
+                                         ((F.col('b.Quantity')* F.col('c.Multiplier'))*F.col('a.Avg_retail_Price')).alias('GMV_Retail_Cost'),\
+                                         F.col('d.AvgFullCashPrice'),\
+                                         ((F.col('b.Quantity')* F.col('c.Multiplier'))*F.col('d.AvgFullCashPrice')).alias('GMV_Full_Cash_Price'),\
+                                         F.col('d.AvgEIP'),\
+                                         ((F.col('b.Quantity')* F.col('c.Multiplier'))*F.col('d.AvgEIP')).alias('GMV_EIP'),\
+                                         F.col('a.Activations_as_%_of_TotalSales'),\
+                                         ((F.col('b.Quantity')* F.col('c.Multiplier'))*F.col('a.Activations_as_%_of_TotalSales')).alias('Activations'),\
+                                         F.col('Device_Type')).distinct()
+
+
+# Attaching Specs from P1 and P2 parameter portal tables
+
+  Output_Into_Excel_Main_With_Prices_and_Specs_df = Output_Into_Excel_Main_With_Prices_df.alias('a')\
+  .join(Portal_P1_Parameters_df.alias('b'),
+      [
+        F.col('a.manufacturer') == F.col('b.Manufacturer_Name'),
+        F.col('a.model') == F.col('b.Model_Name')
+      ],
+      'left').join(Portal_P2_Parameters_df.alias('c'),
+                  [
+                     F.col('a.operator') == F.col('c.OperatorName'),
+                     F.col('a.manufacturer') == F.col('c.ManufacturerName'),
+                     F.col('a.model') == F.col('c.AliasName'),
+                  ],'left').select('a.*',\
+                                  'b.OS',\
+                                  'b.Display_Size',\
+                                  'b.battery',\
+                                  'b.Processor',\
+                                  'b.ProcessorSpeed',\
+                                  'b.Processor_Cores',\
+                                  'b.ChipManufacturer',\
+                                  'b.ChipModel',\
+                                  'c.RadioCDMA',\
+                                  'c.RadioGSM',\
+                                  'c.RadioLTE',\
+                                  'c.RadioUMTS',\
+                                  'c.DataCDMA',\
+                                  'c.DataGSM',\
+                                  'c.DataHSDPA',\
+                                  'c.DataHSUPA',\
+                                  'c.DataUMTS',\
+                                  'c.DataGlobalRoaming',\
+                                  'c.Data4G')
+        
+# Saving the final Color and Storage dataframe in the output table
+  
+  Output_Into_Excel_Main_With_Prices_and_Specs_df.write.saveAsTable(color_storage_output, format = 'parquet', mode ='overwrite')
+---------------------------------------------------------------------------------------------------------------------------------------
+# Function call
+logger.info("Color and Storage - Running - Building Color and Storage table.")
+
+Color_and_Storage_Function(source_table_df ,HRG_Monthly_Activation_Lookup_df,HRG_Monthly_StoreCost_Lookup_df, HRG_Monthly_RetailPrice_Lookup_df, output_into_excel_main,Portal_DevicePrices_df,Portal_P1_Parameters_df,Portal_P2_Parameters_df )
+
+logger.info("Color and Storage - Color and Report Query successfully completed.")
+---------------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------
