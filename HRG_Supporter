@@ -1,0 +1,89 @@
+#  Purpose     :   To prepare the supporting tables needed for subsequent modules of HRG 
+#  Input(s)    :   Ganges Parsed SellThrough output table (ganges.device_modeling_table) and Portal tables
+#  Ouput(s)    :   Supporting tables (ganges.HRG_QuantitiesByBand and ganges.HRG_Live_Models_List)
+#  Developer   :   Aritra Banerjee (Aritra.Banerjee@mscience.com)
+#  Date        :   04/12/2018
+#  Description :   Creating tables which will support the Market Model algorithms to run and calculate the sell through quantities at Period,                      Operator, Manufacturer and Model level
+-----------------------------------------------------------------------------------------------------------------------------------------
+import pyspark.sql.functions as F
+import pyspark.sql.types as T
+import pyspark.sql.window as W
+
+  
+# Defining variables - update table name here if needed
+HRG_supporter_config_table = 'group_mr.HRG_Supporter_Config_Table'
+HRG_MM3_parameter_table = 'group_mr.MM3_Parameter_List'
+
+
+# Refresh input tables and load functions
+----------------------------------------------------------------------------------------------------------------------------------------
+%sql
+
+refresh table group_mr.HRG_Supporter_Config_Table;
+refresh table group_mr.MM3_Parameter_List;
+
+-- uploading config file & parameter list in a separate notebook, check if read.csv can be used, csv will be in S3
+----------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Supporter/HRG_Quantities_by_Band"
+----------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/Supporter/HRG_Preparing_Input_File_For_MM3"
+----------------------------------------------------------------------------------------------------------------------------------------
+%run "/GROUPS/mr/Telecom/Telecom_Migration/T_Development/HRG/PortalTables/HRG_Load_Portal_Tables"
+----------------------------------------------------------------------------------------------------------------------------------------
+def supporter(Report_Type):
+ 
+  logger.info('HRG Supporter Module Welcomes You.')
+  
+  Function_Status = False
+  
+  # Read config table
+  logger.info('\nHRG Supporter: Reading config table...')
+  config_table = spark.table(HRG_supporter_config_table)
+  logger.info("done")
+  
+  # Get values 
+  Parsed_Output_Table = config_table.where("Field = 'Parser Output Table'").select('Field_Detail').collect()[0]
+  Phone_Model_With_Alias_Table = config_table.where("Field = 'Phone Model With Alias'").select('Field_Detail').collect()[0]
+  P1_Parameters_Table = config_table.where("Field = 'P1 Parameters'").select('Field_Detail').collect()[0]
+  
+  #   Load the Portal Tables
+  logger.info('\nHRG Supporter: Loading the portal tables...')
+  
+  Portal_P1_Parameter = HRG_Load_Portal_Tables(P1_Parameters_Table[0])
+  Portal_Phone_Model_With_Alias = HRG_Load_Portal_Tables(Phone_Model_With_Alias_Table[0])
+  
+  logger.info("done")
+  
+  logger.info('\nHRG Supporter: Executing based on config table...')
+  
+  # Create Quantities by Band Table
+  logger.info("\nHRG Supporter: Creating quantities by band table...")
+  Function_Status = HRG_Quantities_By_Band(Parsed_Output_Table[0])
+  if Function_Status == True:
+    logger.info("done")
+  if Function_Status == False:
+    logger.info("failed")
+  
+#   # Read MM3 parameter list from config file
+#   logger.info("\nHRG Supporter: Reading MM3 parameter list...")
+#   MM3_parameter_table = spark.table(HRG_MM3_parameter_table)
+#   logger.info("HRG Supporter: done")
+  
+# #   # Upload MM3 parameter list
+# #   logger.info("\nHRG Supporter: Uploading MM3 parameter list...")
+# #   HRG_MM3_Parameter_List_Upload(MM3_Parameter_List_Table)
+# #   logger.info("HRG Supporter: done")
+    
+  # Create list of live models
+  logger.info("\nHRG Supporter: Creating list of live models...")
+  Function_Status = HRG_Preparing_Input_File_For_MM3(Portal_Phone_Model_With_Alias, Portal_P1_Parameter, HRG_MM3_parameter_table)
+  if Function_Status == True:
+    logger.info("done")
+  if Function_Status == False:
+    logger.info("failed")
+    
+  logger.info("\nHRG Supporter: All operations complete.")
+  
+  Function_Status = True
+  return Function_Status
+---------------------------------------------------------------------------------------------------------------------------------------
